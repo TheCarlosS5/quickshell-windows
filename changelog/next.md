@@ -25,6 +25,7 @@ set shell id.
 - Added support for IPC signal listeners.
 - Added Quickshell version checking and version gated preprocessing.
 - Added a way to detect if an icon is from the system icon theme or not.
+- Added vulkan support to screencopy.
 
 ## Other Changes
 
@@ -51,3 +52,4 @@ set shell id.
 ## Packaging Changes
 
 `glib` and `polkit` have been added as dependencies when compiling with polkit agent support.
+`vulkan-headers` has been added as a build-time dependency for screencopy (Vulkan backend support).
