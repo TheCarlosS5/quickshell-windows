@@ -1,3 +1,5 @@
+#include <qcoreapplication.h>
+#include <qdir.h>
 #include <qguiapplication.h>
 #include <qtenvironmentvariables.h>
 #include <qqml.h>
@@ -23,6 +25,11 @@ class Win32Plugin: public QsEnginePlugin {
 		// the overview stayed on its first frame until the mouse moved). The basic loop
 		// drives animations from the GUI thread and renders them reliably.
 		if (qEnvironmentVariableIsEmpty("QSG_RENDER_LOOP")) qputenv("QSG_RENDER_LOOP", "basic");
+
+		// <exe>/bin holds Windows stand-ins for the small Linux commands configs call
+		// (qalc, xdg-open, notify-send, ...); child processes resolve them through PATH.
+		auto bin = QDir::toNativeSeparators(QDir(QCoreApplication::applicationDirPath()).filePath("bin"));
+		qputenv("PATH", (bin + ';' + qEnvironmentVariable("PATH")).toLocal8Bit());
 
 		qs::win32::loadBundledFonts();
 		qs::win32::setupIconThemes();
