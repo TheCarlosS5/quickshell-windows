@@ -175,6 +175,9 @@ private:
 				state.albumArtist = toQ(props.AlbumArtist());
 				state.artUrl = saveArt(props.Thumbnail());
 			}
+			qCDebug(logMpris) << "Session" << id << "title" << state.title << "artist" << state.artist;
+		} catch (const winrt::hresult_error& e) {
+			qCWarning(logMpris) << "Media properties unavailable for" << id << toQ(e.message());
 		} catch (...) {}
 
 		try {
