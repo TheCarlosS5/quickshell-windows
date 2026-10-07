@@ -3,6 +3,7 @@
 #include "desktopentry.hpp"
 
 #ifdef _WIN32
+#include <qcryptographichash.h>
 #include <qdir.h>
 #include <qfileinfo.h>
 #include <qhash.h>
@@ -125,7 +126,21 @@ QString themeIconFor(const QString& key) {
 	return {};
 }
 
-QPixmap shellIcon(const QString& parsingName, QSize size) {
+// Large enough for every place the shell shows app icons; scaled down on use.
+constexpr int CACHED_ICON_SIZE = 128;
+
+QString iconCachePath(const QString& parsingName) {
+	static const auto dir = [] {
+		auto d = QDir(qEnvironmentVariable("LOCALAPPDATA")).filePath("ii-windows/cache/appicons");
+		QDir().mkpath(d);
+		return d;
+	}();
+	auto hash = QCryptographicHash::hash(parsingName.toUtf8(), QCryptographicHash::Sha1).toHex();
+	return QDir(dir).filePath(QString::fromLatin1(hash) + ".png");
+}
+
+// QImage, not QPixmap: this also runs on the scanner thread.
+QImage shellIcon(const QString& parsingName, QSize size) {
 	ComPtr<IShellItem> item;
 	auto path = parsingName.startsWith("shell:") || parsingName.contains(":\\")
 	              ? parsingName
@@ -135,13 +150,14 @@ QPixmap shellIcon(const QString& parsingName, QSize size) {
 	ComPtr<IShellItemImageFactory> factory;
 	if (FAILED(item.As(&factory))) return {};
 
+
 	HBITMAP bitmap = nullptr;
 	SIZE want {std::max(size.width(), 16), std::max(size.height(), 16)};
 	if (FAILED(factory->GetImage(want, SIIGBF_RESIZETOFIT | SIIGBF_ICONONLY, &bitmap))) return {};
 	auto image = QImage::fromHBITMAP(bitmap);
 	DeleteObject(bitmap);
 	if (image.isNull()) return {};
-	return QPixmap::fromImage(image.convertToFormat(QImage::Format_ARGB32_Premultiplied));
+	return image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
 }
 
 } // namespace
@@ -162,13 +178,34 @@ QPixmap appIconPixmap(const QString& name, QSize size) {
 	);
 	auto exeName = parts.value(1);
 
+	// Resolved icons are reused: search results request them on every keystroke.
+	static QHash<QString, QPixmap> memo;
+	auto memoKey = name + '@' + QString::number(size.width()) + 'x' + QString::number(size.height());
+	if (auto it = memo.constFind(memoKey); it != memo.constEnd()) return *it;
+
+	QPixmap pixmap;
 	for (const auto& key: {exeName, parsingName}) {
 		if (auto theme = themeIconFor(key); !theme.isEmpty()) {
-			return QIcon::fromTheme(theme).pixmap(size);
+			pixmap = QIcon::fromTheme(theme).pixmap(size);
+			break;
 		}
 	}
 
-	return shellIcon(parsingName, size);
+	if (pixmap.isNull()) {
+		// Normally already extracted by the background app scan.
+		auto cached = iconCachePath(parsingName);
+		auto image = QImage(cached);
+		if (image.isNull()) {
+			image = shellIcon(parsingName, QSize(CACHED_ICON_SIZE, CACHED_ICON_SIZE));
+			if (!image.isNull()) image.save(cached);
+		}
+		if (!image.isNull()) {
+			pixmap = QPixmap::fromImage(image.scaled(size, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+		}
+	}
+
+	if (!pixmap.isNull()) memo.insert(memoKey, pixmap);
+	return pixmap;
 }
 
 QList<ParsedDesktopEntryData> scanInstalledApps() {
@@ -212,6 +249,13 @@ QList<ParsedDesktopEntryData> scanInstalledApps() {
 				data.workingDirectory = QDir::homePath();
 				if (!exe.isEmpty()) data.keywords = {exe};
 				entries.append(data);
+
+				// Extract the shell icon off the GUI thread once; the provider reads the cache.
+				auto cached = iconCachePath(parsing);
+				if (!QFileInfo::exists(cached)) {
+					auto image = shellIcon(parsing, QSize(CACHED_ICON_SIZE, CACHED_ICON_SIZE));
+					if (!image.isNull()) image.save(cached);
+				}
 			}
 		}
 	}

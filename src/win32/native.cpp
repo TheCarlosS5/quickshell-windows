@@ -304,12 +304,25 @@ void InputRegions::poll() {
 
 void InputRegions::setPassthrough(QWindow* window, bool passthrough) {
 	auto& entry = this->entries[window];
-	if (entry.passthrough == passthrough && window->flags().testFlag(Qt::WindowTransparentForInput) == passthrough) {
-		return;
-	}
+	auto h = toHwnd(hwnd(window));
+	if (!h) return;
 
+	// Only the native mouse hit-testing style changes. Qt's WindowTransparentForInput would
+	// also make Qt drop keyboard input, breaking text fields in partially click-through
+	// windows (the overview search).
+	auto ex = GetWindowLongW(h, GWL_EXSTYLE);
+	auto want = passthrough ? (ex | WS_EX_TRANSPARENT | WS_EX_LAYERED) : (ex & ~WS_EX_TRANSPARENT);
+	if (entry.passthrough == passthrough && ex == want) return;
 	entry.passthrough = passthrough;
-	window->setFlag(Qt::WindowTransparentForInput, passthrough);
+	if (ex == want) return;
+
+	if (!(ex & WS_EX_LAYERED)) {
+		SetWindowLongW(h, GWL_EXSTYLE, want);
+		// A freshly layered window is invisible until it has layered attributes.
+		SetLayeredWindowAttributes(h, 0, 255, LWA_ALPHA);
+	} else {
+		SetWindowLongW(h, GWL_EXSTYLE, want);
+	}
 }
 
 // AppBar

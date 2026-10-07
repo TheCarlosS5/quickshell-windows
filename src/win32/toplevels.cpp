@@ -251,18 +251,26 @@ void WindowTracker::forceForeground(quintptr handle) {
 	if (attached) AttachThreadInput(self, fgThread, FALSE);
 	if (GetForegroundWindow() == hwnd) return;
 
-	// 3. Windows lifts the foreground lock while Alt is held. Press Alt, switch, release Alt:
-	//    the previous app only sees Alt-down (no menu, menus open on release) and the
-	//    release lands in our window, where a lone Alt does nothing.
-	INPUT down {};
-	down.type = INPUT_KEYBOARD;
-	down.ki.wVk = VK_MENU;
-	INPUT up = down;
-	up.ki.dwFlags = KEYEVENTF_KEYUP;
+	// 3. Windows lifts the foreground lock while Alt is held. Press Alt, switch, then release
+	//    it behind an unassigned key (vkE8): a lone Alt press+release would put the window
+	//    in keyboard menu mode, which swallows the next keystrokes.
+	auto key = [](WORD vk, bool up) {
+		INPUT in {};
+		in.type = INPUT_KEYBOARD;
+		in.ki.wVk = vk;
+		in.ki.dwFlags = up ? KEYEVENTF_KEYUP : 0;
+		return in;
+	};
 	auto altHeld = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
-	if (!altHeld) SendInput(1, &down, sizeof(INPUT));
+	if (!altHeld) {
+		auto down = key(VK_MENU, false);
+		SendInput(1, &down, sizeof(INPUT));
+	}
 	SetForegroundWindow(hwnd);
-	if (!altHeld) SendInput(1, &up, sizeof(INPUT));
+	if (!altHeld) {
+		INPUT rest[] = {key(0xE8, false), key(0xE8, true), key(VK_MENU, true)};
+		SendInput(3, rest, sizeof(INPUT));
+	}
 
 	if (GetForegroundWindow() != hwnd) {
 		qWarning() << "Could not move keyboard focus to" << Qt::hex << handle;
