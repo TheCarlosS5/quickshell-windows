@@ -45,7 +45,7 @@ struct StringLiteral16 {
 
 // NOLINTBEGIN
 #define DROP_EMIT(object, func)                                                                    \
-	DropEmitter(object, static_cast<void (*)(typeof(object))>([](typeof(object) o) { o->func(); }))
+	DropEmitter(object, static_cast<void (*)(__typeof__(object))>([](__typeof__(object) o) { o->func(); }))
 
 #define DROP_EMIT_IF(cond, object, func) (cond) ? DROP_EMIT(object, func) : DropEmitter()
 

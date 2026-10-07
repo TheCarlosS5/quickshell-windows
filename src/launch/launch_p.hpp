@@ -4,6 +4,8 @@
 #include <string>
 
 #include <CLI/App.hpp>
+
+#include "../core/platform.hpp"
 #include <qcoreapplication.h>
 #include <qstring.h>
 

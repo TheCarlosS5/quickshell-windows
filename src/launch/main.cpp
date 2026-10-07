@@ -1,6 +1,7 @@
 #include "main.hpp"
 #include <cerrno>
 
+#ifndef _WIN32
 #include <fcntl.h>
 #include <qcoreapplication.h>
 #include <qdatastream.h>
@@ -9,6 +10,7 @@
 #include <qlogging.h>
 #include <qtenvironmentvariables.h>
 #include <unistd.h>
+#endif
 
 #include "../core/instanceinfo.hpp"
 #include "../core/logging.hpp"
@@ -83,6 +85,10 @@ int DAEMON_PIPE = -1; // NOLINT
 
 void exitDaemon(int code) {
 	if (DAEMON_PIPE == -1) return;
+#ifdef _WIN32
+	(void) code;
+}
+#else
 
 	if (write(DAEMON_PIPE, &code, sizeof(int)) == -1) {
 		qCritical().nospace() << "Failed to write daemon exit command with error code " << errno << ": "
@@ -115,6 +121,7 @@ void exitDaemon(int code) {
 
 	close(fd);
 }
+#endif
 
 int main(int argc, char** argv) {
 	QCoreApplication::setApplicationName("quickshell");

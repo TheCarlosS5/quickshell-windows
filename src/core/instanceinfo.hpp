@@ -3,7 +3,8 @@
 #include <qdatetime.h>
 #include <qlogging.h>
 #include <qstring.h>
-#include <sys/types.h>
+
+#include "platform.hpp"
 
 struct InstanceInfo {
 	QString instanceId;

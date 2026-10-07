@@ -15,7 +15,6 @@
 #include <qstring.h>
 #include <qtenvironmentvariables.h>
 #include <qtextstream.h>
-#include <unistd.h>
 
 #include "../core/common.hpp"
 #include "../core/instanceinfo.hpp"
@@ -142,12 +141,12 @@ int launch(const LaunchArgs& args, char** argv) {
 	auto appId = pragmas.appId.isEmpty() ? QStringLiteral("org.quickshell") : pragmas.appId;
 
 	InstanceInfo::CURRENT = InstanceInfo {
-	    .instanceId = base36Encode(getpid()) + base36Encode(launchTime),
+	    .instanceId = base36Encode(qs::platform::currentPid()) + base36Encode(launchTime),
 	    .configPath = args.configPath,
 	    .shellId = shellId,
 	    .appId = appId,
 	    .launchTime = qs::Common::LAUNCH_TIME,
-	    .pid = getpid(),
+	    .pid = qs::platform::currentPid(),
 	    .display = getDisplayConnection(),
 	};
 

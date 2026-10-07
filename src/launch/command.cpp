@@ -23,7 +23,9 @@
 #include <qstandardpaths.h>
 #include <qtenvironmentvariables.h>
 #include <qtversion.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 #include "../core/debuginfo.hpp"
 #include "../core/instanceinfo.hpp"
@@ -509,6 +511,13 @@ int runCommand(int argc, char** argv) {
 	}
 
 	// Has to happen before extra threads are spawned.
+#ifdef _WIN32
+	// No fork() on Windows. The ii-windows launcher starts quickshell as a detached
+	// GUI process instead, so daemonizing here is unnecessary.
+	if (state.misc.daemonize) {
+		qWarning() << "--daemonize is not supported on Windows; running in the foreground.";
+	}
+#else
 	if (state.misc.daemonize) {
 		auto closepipes = std::array<int, 2>();
 		if (pipe(closepipes.data()) == -1) {
@@ -539,6 +548,7 @@ int runCommand(int argc, char** argv) {
 			return ret;
 		}
 	}
+#endif
 
 	{
 		auto level = state.log.verbosity == 0 ? QtWarningMsg

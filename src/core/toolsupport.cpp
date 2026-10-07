@@ -1,7 +1,6 @@
 #include "toolsupport.hpp"
 #include <cerrno>
 
-#include <fcntl.h>
 #include <qcontainerfwd.h>
 #include <qdebug.h>
 #include <qdir.h>
@@ -14,6 +13,7 @@
 
 #include "logcat.hpp"
 #include "paths.hpp"
+#include "platform.hpp"
 #include "scan.hpp"
 
 namespace qs::core {
@@ -54,24 +54,17 @@ bool QmlToolingSupport::lockTooling() {
 		return false;
 	}
 
-	struct flock lock = {
-	    .l_type = F_WRLCK,
-	    .l_whence = SEEK_SET, // NOLINT (fcntl.h??)
-	    .l_start = 0,
-	    .l_len = 0,
-	    .l_pid = 0,
-	};
-
-	if (fcntl(file->handle(), F_SETLK, &lock) == 0) {
+	bool busy = false;
+	if (qs::platform::lockFile(file, qs::platform::LockMode::Exclusive, false, &busy)) {
 		qCInfo(logTooling) << "Acquired tooling support lock";
 		QmlToolingSupport::toolingLock = file;
 		return true;
-	} else if (errno == EACCES || errno == EAGAIN) {
+	} else if (busy) {
 		qCInfo(logTooling) << "Tooling support locked by another instance";
 		return false;
 	} else {
 		qCCritical(logTooling).nospace() << "Could not create tooling lock at " << lockPath
-		                                 << " with error code " << errno << ": " << qt_error_string();
+		                                 << ": " << qs::platform::lastErrorString();
 		return false;
 	}
 }

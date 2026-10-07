@@ -23,7 +23,7 @@
 #include <qvariant.h>
 #include <qversionnumber.h>
 #include <qwindowdefs.h>
-#include <unistd.h>
+#include "platform.hpp"
 
 #include "../io/processcore.hpp"
 #include "generation.hpp"
@@ -161,7 +161,7 @@ QuickshellGlobal::QuickshellGlobal(QObject* parent): QObject(parent) {
 }
 
 qint32 QuickshellGlobal::processId() const { // NOLINT
-	return getpid();
+	return qs::platform::currentPid();
 }
 
 QString QuickshellGlobal::instanceId() const { // NOLINT

@@ -3,7 +3,6 @@
 #include <cerrno>
 #include <cstdio>
 
-#include <fcntl.h>
 #include <qbytearrayview.h>
 #include <qcoreapplication.h>
 #include <qdatetime.h>
@@ -27,7 +26,9 @@
 #include <qthread.h>
 #include <qtmetamacros.h>
 #include <qtypes.h>
+#ifndef _WIN32
 #include <sys/mman.h>
+#endif
 #ifdef __linux__
 #include <sys/sendfile.h>
 #include <sys/types.h>
@@ -35,9 +36,20 @@
 #ifdef __FreeBSD__
 #include <unistd.h>
 #endif
+#ifdef _WIN32
+#include <io.h>
+
+namespace {
+int read(int fd, void* buf, size_t count) { return _read(fd, buf, static_cast<unsigned>(count)); }
+int write(int fd, const void* buf, size_t count) {
+	return _write(fd, buf, static_cast<unsigned>(count));
+}
+} // namespace
+#endif
 
 #include "instanceinfo.hpp"
 #include "logcat.hpp"
+#include "platform.hpp"
 #include "logging_p.hpp"
 #include "logging_qtprivate.cpp" // NOLINT
 #include "paths.hpp"
@@ -375,14 +387,14 @@ CategoryFilter LogManager::getFilter(QLatin1StringView category) {
 }
 
 void ThreadLogging::init() {
-	auto logMfd = memfd_create("quickshell:logs", 0);
+	auto logMfd = qs::platform::createAnonymousFile("quickshell:logs");
 
 	if (logMfd == -1) {
 		qCCritical(logLogging) << "Failed to create memfd for initial log storage"
 		                       << qt_error_string(-1);
 	}
 
-	auto dlogMfd = memfd_create("quickshell:detailedlogs", 0);
+	auto dlogMfd = qs::platform::createAnonymousFile("quickshell:detailedlogs");
 
 	if (dlogMfd == -1) {
 		qCCritical(logLogging) << "Failed to create memfd for initial detailed log storage"
@@ -470,15 +482,7 @@ void ThreadLogging::initFs() {
 		delete detailedFile;
 		detailedFile = nullptr;
 	} else {
-		struct flock lock = {
-		    .l_type = F_WRLCK,
-		    .l_whence = SEEK_SET,
-		    .l_start = 0,
-		    .l_len = 0,
-		    .l_pid = 0,
-		};
-
-		if (fcntl(detailedFile->handle(), F_SETLK, &lock) != 0) { // NOLINT
+		if (!qs::platform::lockFile(detailedFile, qs::platform::LockMode::Exclusive)) {
 			qCWarning(logLogging) << "Unable to set lock marker on detailed log file. --follow from "
 			                         "other instances will not work.";
 		}
@@ -974,17 +978,14 @@ bool LogReader::continueReading() {
 }
 
 void LogFollower::FcntlWaitThread::run() {
-	struct flock lock = {
-	    .l_type = F_RDLCK, // won't block other read locks when we take it
-	    .l_whence = SEEK_SET,
-	    .l_start = 0,
-	    .l_len = 0,
-	    .l_pid = 0,
-	};
+	// shared: won't block other read locks when we take it
+	auto locked = qs::platform::lockFile(
+	    this->follower->reader->file,
+	    qs::platform::LockMode::Shared,
+	    true
+	);
 
-	auto r = fcntl(this->follower->reader->file->handle(), F_SETLKW, &lock); // NOLINT
-
-	if (r != 0) {
+	if (!locked) {
 		qCWarning(logLogging).nospace()
 		    << "Failed to wait for write locks to be removed from log file with error code " << errno
 		    << ": " << qt_error_string();

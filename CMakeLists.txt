@@ -85,11 +85,17 @@ boption(NETWORK "Network" ON)
 include(cmake/install-qml-module.cmake)
 include(cmake/util.cmake)
 
-add_compile_options(-Wall -Wextra -Wno-vla-cxx-extension)
+if (WIN32)
+	# clang-cl: keep GNU extensions quickshell relies on (VLAs, statement expressions)
+	add_compile_options(-Wno-vla-cxx-extension -Wno-gnu-statement-expression-from-macro-expansion /utf-8)
+	add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+else()
+	add_compile_options(-Wall -Wextra -Wno-vla-cxx-extension)
 
-# pipewire defines these, breaking PCH
-add_compile_definitions(_REENTRANT)
-add_compile_options(-fno-strict-overflow)
+	# pipewire defines these, breaking PCH
+	add_compile_definitions(_REENTRANT)
+	add_compile_options(-fno-strict-overflow)
+endif()
 
 if (FRAME_POINTERS)
 	add_compile_options(-fno-omit-frame-pointer)
@@ -160,6 +166,7 @@ if (USE_JEMALLOC)
 	target_link_libraries(quickshell PRIVATE ${JEMALLOC_LIBRARIES})
 endif()
 
+if (NOT WIN32)
 install(CODE "
 	execute_process(
 		COMMAND ${CMAKE_COMMAND} -E create_symlink \
@@ -177,3 +184,4 @@ install(
 	DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps
 	RENAME org.quickshell.svg
 )
+endif()
