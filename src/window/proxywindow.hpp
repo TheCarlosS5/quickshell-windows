@@ -142,6 +142,11 @@ public:
 	[[nodiscard]] PendingRegion* mask() const;
 	virtual void setMask(PendingRegion* mask);
 
+	// Lets a platform backend apply input masks itself instead of QWindow::setMask
+	// (which clips rendering on some platforms). hasMask is false when no mask is set.
+	using InputMaskHandler = void (*)(QWindow* window, const QRegion& mask, bool hasMask);
+	static void setInputMaskHandler(InputMaskHandler handler);
+
 	[[nodiscard]] QsSurfaceFormat surfaceFormat() const { return this->qsSurfaceFormat; }
 	void setSurfaceFormat(QsSurfaceFormat format);
 

@@ -656,6 +656,14 @@ void ProxiedWindow::exposeEvent(QExposeEvent* event) {
 
 void ProxyWindowContentItem::updatePolish() { emit this->polished(); }
 
+namespace {
+ProxyWindowBase::InputMaskHandler INPUT_MASK_HANDLER = nullptr; // NOLINT
+}
+
+void ProxyWindowBase::setInputMaskHandler(InputMaskHandler handler) {
+	INPUT_MASK_HANDLER = handler;
+}
+
 void ProxyWindowBase::onPolished() {
 	if (this->pendingPolish.inputMask) {
 		QRegion mask;
@@ -663,8 +671,12 @@ void ProxyWindowBase::onPolished() {
 			mask = this->mMask->applyTo(QRect(0, 0, this->width(), this->height()));
 		}
 
-		this->window->setFlag(Qt::WindowTransparentForInput, this->mMask != nullptr && mask.isEmpty());
-		this->window->setMask(mask);
+		if (INPUT_MASK_HANDLER) {
+			INPUT_MASK_HANDLER(this->window, mask, this->mMask != nullptr);
+		} else {
+			this->window->setFlag(Qt::WindowTransparentForInput, this->mMask != nullptr && mask.isEmpty());
+			this->window->setMask(mask);
+		}
 
 		this->pendingPolish.inputMask = false;
 	}
