@@ -67,3 +67,15 @@ target_include_directories(quickshell-win32-mpris PRIVATE ${CMAKE_CURRENT_SOURCE
 target_compile_options(quickshell-win32-mpris PRIVATE /EHsc)
 target_link_libraries(quickshell-win32-mpris PRIVATE Qt::Quick windowsapp)
 target_link_libraries(quickshell PRIVATE quickshell-win32-mprisplugin)
+
+qt_add_library(quickshell-win32-notifications STATIC services/notifications.cpp)
+qt_add_qml_module(quickshell-win32-notifications
+	URI Quickshell.Services.Notifications
+	VERSION 0.1
+	DEPENDENCIES QtQuick
+)
+install_qml_module(quickshell-win32-notifications)
+target_include_directories(quickshell-win32-notifications PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/services)
+target_compile_options(quickshell-win32-notifications PRIVATE /EHsc)
+target_link_libraries(quickshell-win32-notifications PRIVATE Qt::Quick windowsapp user32)
+target_link_libraries(quickshell PRIVATE quickshell-win32-notificationsplugin)

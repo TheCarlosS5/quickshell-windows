@@ -2,6 +2,7 @@
 #include <algorithm>
 
 #include <qcolor.h>
+#include <qfileinfo.h>
 #include <qicon.h>
 #include <qlogging.h>
 #include <qpainter.h>
@@ -9,6 +10,7 @@
 #include <qsize.h>
 #include <qstring.h>
 
+#include "platform.hpp"
 #include "winapps.hpp"
 
 QPixmap
@@ -41,7 +43,10 @@ IconImageProvider::requestPixmap(const QString& id, QSize* size, const QSize& re
 		}
 	}
 
-	auto icon = QIcon::fromTheme(iconName);
+	// Image files by absolute path (notification app logos, notify-send -i C:\...).
+	auto localPath = qs::platform::normalizeLocalPath(iconName);
+	auto icon = QFileInfo(localPath).isAbsolute() && QFileInfo::exists(localPath) ? QIcon(localPath)
+	                                                                                 : QIcon::fromTheme(iconName);
 	if (icon.isNull() && !fallbackName.isEmpty()) icon = QIcon::fromTheme(fallbackName);
 	if (icon.isNull() && !path.isEmpty()) icon = QPixmap(path);
 
