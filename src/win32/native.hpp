@@ -17,7 +17,9 @@ namespace qs::win32 {
 
 // Mirrors wlr-layer-shell layers. Windows only has "topmost" and "normal" bands,
 // so Top/Overlay are both topmost with Overlay re-raised above Top, and
-// Background/Bottom sit at the bottom of the normal band.
+// Background/Bottom are kept directly above the Windows desktop (Progman): under every
+// application window, over the Windows wallpaper. They are never children of Explorer's
+// windows, so an Explorer restart cannot take them down.
 enum class Layer : quint8 {
 	Background = 0,
 	Bottom = 1,
@@ -43,9 +45,11 @@ public:
 	// Temporarily drops Top-layer windows on a monitor below everything (fullscreen apps).
 	void setFullscreenAppActive(quintptr monitor, bool active);
 	void restack();
+	// Puts desktop-layer windows back right above Progman (z-order drifts as apps activate).
+	void restackDesktop();
 
 private:
-	explicit LayerManager(QObject* parent = nullptr): QObject(parent) {}
+	explicit LayerManager(QObject* parent = nullptr);
 	void apply(QWindow* window, Layer layer);
 
 	QHash<QWindow*, Layer> layers;

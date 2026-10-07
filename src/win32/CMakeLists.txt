@@ -12,7 +12,7 @@ qt_add_qml_module(quickshell-win32
 
 install_qml_module(quickshell-win32)
 
-add_library(quickshell-win32-init OBJECT init.cpp)
+add_library(quickshell-win32-init OBJECT init.cpp fonts.cpp)
 
 target_link_libraries(quickshell-win32 PUBLIC Qt::Quick Qt6::QuickPrivate dwmapi shell32 user32 ole32 propsys wtsapi32)
 target_link_libraries(quickshell-win32-init PRIVATE Qt::Quick Qt::Qml Qt6::QuickPrivate)

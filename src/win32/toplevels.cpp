@@ -85,6 +85,12 @@ WindowHandle::WindowHandle(quintptr hwnd, QObject* parent): QObject(parent), mHw
 	GetWindowThreadProcessId(toHwnd(hwnd), &pid);
 	this->mPid = pid;
 	this->mExecutable = processImage(pid);
+	this->mHyprland = new HyprlandToplevelInfo(this);
+}
+
+HyprlandToplevelInfo::HyprlandToplevelInfo(WindowHandle* handle): QObject(handle), handle(handle) {
+	QObject::connect(handle, &WindowHandle::titleChanged, this, &HyprlandToplevelInfo::titleChanged);
+	QObject::connect(handle, &WindowHandle::activatedChanged, this, &HyprlandToplevelInfo::activatedChanged);
 }
 
 bool WindowHandle::refresh(quintptr foreground) {

@@ -25,6 +25,19 @@ QUrl QsUrlInterceptor::intercept(
 ) {
 	auto url = originalUrl;
 
+#ifdef _WIN32
+	// A Windows path like "C:/dir/file.png" assigned to a url property parses as scheme "c".
+	// Configs written for Linux pass absolute paths around without file://, so treat a
+	// one-letter scheme as a drive letter.
+	if (url.scheme().size() == 1 && url.scheme().at(0).isLetter()) {
+		auto local = QUrl::fromLocalFile(
+		    url.scheme().toUpper() % ':' % url.path(QUrl::FullyDecoded).replace('\\', '/')
+		);
+		qCDebug(logQsIntercept) << "Rewrote drive path" << originalUrl << "to" << local;
+		return local;
+	}
+#endif
+
 	if (url.scheme() == "root") {
 		url.setScheme("qs");
 

@@ -52,6 +52,51 @@ void applyShellWindowStyle(QWindow* window, bool focusable) {
 
 // LayerManager
 
+namespace {
+// The topmost visible window (z-order) that covers the whole monitor belongs to us?
+bool fullscreenWindowIsOurs(quintptr monitor) {
+	MONITORINFO info {};
+	info.cbSize = sizeof(info);
+	if (!GetMonitorInfoW(reinterpret_cast<HMONITOR>(monitor), &info)) return false; // NOLINT
+
+	struct Search {
+		RECT monitor;
+		DWORD pid = 0;
+	} search {info.rcMonitor};
+
+	EnumWindows(
+	    [](HWND hwnd, LPARAM data) -> BOOL {
+		    auto* s = reinterpret_cast<Search*>(data); // NOLINT
+		    if (!IsWindowVisible(hwnd)) return TRUE;
+		    DWORD cloaked = 0;
+		    DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+		    if (cloaked) return TRUE;
+		    RECT r;
+		    GetWindowRect(hwnd, &r);
+		    if (r.left <= s->monitor.left && r.top <= s->monitor.top && r.right >= s->monitor.right
+		        && r.bottom >= s->monitor.bottom)
+		    {
+			    GetWindowThreadProcessId(hwnd, &s->pid);
+			    return FALSE;
+		    }
+		    return TRUE;
+	    },
+	    reinterpret_cast<LPARAM>(&search) // NOLINT
+	);
+
+	return search.pid == GetCurrentProcessId();
+}
+
+void CALLBACK onForegroundChanged(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
+	QMetaObject::invokeMethod(LayerManager::instance(), &LayerManager::restackDesktop, Qt::QueuedConnection);
+}
+} // namespace
+
+LayerManager::LayerManager(QObject* parent): QObject(parent) {
+	// Out-of-context hook, nothing injected.
+	SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, onForegroundChanged, 0, 0, WINEVENT_OUTOFCONTEXT);
+}
+
 LayerManager* LayerManager::instance() {
 	static auto* manager = new LayerManager(); // NOLINT
 	return manager;
@@ -80,10 +125,55 @@ void LayerManager::remove(QWindow* window) {
 void LayerManager::apply(QWindow* window, Layer layer) {
 	auto above = layer == Layer::Top || layer == Layer::Overlay;
 	window->setFlag(Qt::WindowStaysOnTopHint, above);
-	window->setFlag(Qt::WindowStaysOnBottomHint, !above);
+	// Not WindowStaysOnBottomHint: HWND_BOTTOM would put us under the desktop itself.
+	window->setFlag(Qt::WindowStaysOnBottomHint, false);
+	if (!above) this->restackDesktop();
+}
+
+void LayerManager::restackDesktop() {
+	auto* progman = FindWindowW(L"Progman", nullptr);
+	if (!progman) return;
+
+	// Desired order, top to bottom: Bottom-layer windows, then Background-layer windows,
+	// then Progman.
+	QList<HWND> ours;
+	for (auto pass: {Layer::Bottom, Layer::Background}) {
+		for (auto [window, layer]: this->layers.asKeyValueRange()) {
+			if (layer != pass || !window->isVisible()) continue;
+			if (auto* h = toHwnd(hwnd(window))) ours.append(h);
+		}
+	}
+	if (ours.isEmpty()) return;
+
+	// Already in place? Walking up from Progman we must meet ours in reverse order.
+	auto* walk = GetWindow(progman, GW_HWNDPREV);
+	auto inPlace = true;
+	for (auto i = ours.size() - 1; i >= 0; --i) {
+		if (walk != ours[i]) {
+			inPlace = false;
+			break;
+		}
+		walk = GetWindow(walk, GW_HWNDPREV);
+	}
+	if (inPlace) return;
+
+	// Lowest window above Progman that is not ours. If it is topmost there are no normal
+	// windows at all; inserting after a topmost window would make ours topmost, so use the
+	// top of the normal band instead.
+	auto* above = GetWindow(progman, GW_HWNDPREV);
+	while (above && ours.contains(above)) above = GetWindow(above, GW_HWNDPREV);
+	auto aboveIsTopmost = above && (GetWindowLongW(above, GWL_EXSTYLE) & WS_EX_TOPMOST);
+
+	HWND insertAfter = (!above || aboveIsTopmost) ? HWND_NOTOPMOST : above;
+	for (auto* h: ours) {
+		SetWindowPos(h, insertAfter, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+		insertAfter = h;
+	}
 }
 
 void LayerManager::restack() {
+	this->restackDesktop();
+
 	// Top first, then Overlay, so Overlay ends up at the very top of the topmost band.
 	for (auto pass: {Layer::Top, Layer::Overlay}) {
 		for (auto [window, layer]: this->layers.asKeyValueRange()) {
@@ -109,6 +199,13 @@ void LayerManager::restack() {
 
 void LayerManager::setFullscreenAppActive(quintptr monitor, bool active) {
 	if (active == this->fullscreenMonitors.contains(monitor)) return;
+
+	// Our own full-screen surfaces (overview, session menu) also trigger ABN_FULLSCREENAPP;
+	// only real applications (games, video players) should push the shell aside.
+	if (active && fullscreenWindowIsOurs(monitor)) {
+		qCInfo(logWin32) << "Ignoring fullscreen notification for our own window";
+		return;
+	}
 	qCInfo(logWin32) << "Fullscreen app" << (active ? "entered" : "left") << "monitor" << monitor;
 
 	if (active) {

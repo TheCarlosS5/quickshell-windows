@@ -127,6 +127,9 @@ void WinPanelWindow::connectWindow() {
 	);
 
 	this->updateScreen();
+	// updateScreen() skips the work when the screen was assigned before the native window
+	// existed, so lay the panel out now that it does.
+	this->updateDimensions();
 	this->updateLayer();
 	this->updatePanelStack();
 }
@@ -222,7 +225,8 @@ void WinPanelWindow::updateDimensions(bool propagate) {
 	if (this->bExclusionMode != ExclusionMode::Ignore) {
 		for (auto* panel: WinPanelStack::instance()->panels(this)) {
 			if (panel == this) break;
-			if (panel->layer() != this->layer()) continue;
+			// Like layer-shell, exclusive zones apply across layers (the bar pushes the
+			// overview and sidebars down too); panels opt out with ExclusionMode.Ignore.
 			if (panel->mTrackedScreen != this->mTrackedScreen) continue;
 
 			auto edge = panel->bcExclusionEdge.value();
@@ -284,6 +288,8 @@ void WinPanelWindow::updatePanelStack() {
 
 	if (this->window->isVisible()) {
 		WinPanelStack::instance()->addPanel(this);
+		// Panels shown later sit inside the zones of the ones already shown.
+		this->updateDimensions(false);
 	} else {
 		WinPanelStack::instance()->removePanel(this);
 	}

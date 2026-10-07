@@ -1,5 +1,7 @@
 #include "hyprland.hpp"
 
+#include <string>
+
 #include <qguiapplication.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
@@ -251,6 +253,43 @@ HyprlandWorkspace* HyprlandMonitor::activeWorkspace() const {
 }
 
 QVariantMap HyprlandMonitor::lastIpcObject() const {
+	// Hyprland's "reserved" = space taken by exclusive zones: the gap between the monitor
+	// and its work area (our bar's appbar).
+	QVariantList reserved {0, 0, 0, 0};
+	if (this->mScreen) {
+		struct Find {
+			std::wstring device;
+			MONITORINFOEXW info {};
+			bool found = false;
+		} find {this->mScreen->name().toStdWString()};
+		EnumDisplayMonitors(
+		    nullptr,
+		    nullptr,
+		    [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
+			    auto* f = reinterpret_cast<Find*>(data); // NOLINT
+			    MONITORINFOEXW info {};
+			    info.cbSize = sizeof(info);
+			    if (GetMonitorInfoW(monitor, &info) && f->device == info.szDevice) {
+				    f->info = info;
+				    f->found = true;
+				    return FALSE;
+			    }
+			    return TRUE;
+		    },
+		    reinterpret_cast<LPARAM>(&find) // NOLINT
+		);
+		if (find.found) {
+			const auto& m = find.info.rcMonitor;
+			const auto& w = find.info.rcWork;
+			reserved = QVariantList {
+			    static_cast<int>(w.left - m.left),
+			    static_cast<int>(w.top - m.top),
+			    static_cast<int>(m.right - w.right),
+			    static_cast<int>(m.bottom - w.bottom),
+			};
+		}
+	}
+
 	return {
 	    {"id", this->mId},
 	    {"name", this->name()},
@@ -261,7 +300,7 @@ QVariantMap HyprlandMonitor::lastIpcObject() const {
 	    {"height", this->height()},
 	    {"scale", this->scale()},
 	    {"focused", this->mFocused},
-	    {"reserved", QVariantList {0, 0, 0, 0}},
+	    {"reserved", reserved},
 	    {"activeWorkspace", QVariantMap {{"id", 1}, {"name", "1"}}},
 	    {"specialWorkspace", QVariantMap {{"id", 0}, {"name", ""}}},
 	    {"transform", 0},

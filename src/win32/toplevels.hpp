@@ -28,6 +28,9 @@ class WindowHandle: public QObject {
 	Q_PROPERTY(bool maximized READ maximized WRITE setMaximized NOTIFY maximizedChanged);
 	Q_PROPERTY(bool minimized READ minimized WRITE setMinimized NOTIFY minimizedChanged);
 	Q_PROPERTY(bool fullscreen READ fullscreen WRITE setFullscreen NOTIFY fullscreenChanged);
+	/// Hyprland-style identity (`toplevel.HyprlandToplevel.address`) for configs that pair
+	/// toplevels with `hyprctl clients` data.
+	Q_PROPERTY(QObject* HyprlandToplevel READ hyprlandToplevel CONSTANT);
 	/// Windows extensions
 	Q_PROPERTY(qulonglong hwnd READ hwnd CONSTANT);
 	Q_PROPERTY(QString executable READ executable CONSTANT);
@@ -50,6 +53,8 @@ public:
 	[[nodiscard]] QString executable() const { return this->mExecutable; }
 	[[nodiscard]] qint64 pid() const { return this->mPid; }
 	[[nodiscard]] QRect geometry() const { return this->mGeometry; }
+	[[nodiscard]] QObject* hyprlandToplevel() const { return this->mHyprland; }
+	[[nodiscard]] QString address() const { return QString::number(this->mHwnd, 16); }
 
 	void setMaximized(bool maximized);
 	void setMinimized(bool minimized);
@@ -87,6 +92,27 @@ private:
 	bool mFullscreen = false;
 	QRect mGeometry;
 	QList<QuickshellScreenInfo*> mScreens;
+	QObject* mHyprland = nullptr;
+};
+
+class HyprlandToplevelInfo: public QObject {
+	Q_OBJECT;
+	Q_PROPERTY(QString address READ address CONSTANT);
+	Q_PROPERTY(QString title READ title NOTIFY titleChanged);
+	Q_PROPERTY(bool activated READ activated NOTIFY activatedChanged);
+
+public:
+	explicit HyprlandToplevelInfo(WindowHandle* handle);
+	[[nodiscard]] QString address() const { return this->handle->address(); }
+	[[nodiscard]] QString title() const { return this->handle->title(); }
+	[[nodiscard]] bool activated() const { return this->handle->activated(); }
+
+signals:
+	void titleChanged();
+	void activatedChanged();
+
+private:
+	WindowHandle* handle;
 };
 
 // Tracks the user's application windows with out-of-context WinEvent hooks (no injection).
