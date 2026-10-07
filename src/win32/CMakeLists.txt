@@ -91,3 +91,14 @@ install_qml_module(quickshell-win32-windows)
 target_include_directories(quickshell-win32-windows PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/services)
 target_link_libraries(quickshell-win32-windows PRIVATE Qt::Quick Qt::Gui wlanapi iphlpapi ole32 oleaut32)
 target_link_libraries(quickshell PRIVATE quickshell-win32-windowsplugin)
+
+qt_add_library(quickshell-win32-tray STATIC services/tray.cpp)
+qt_add_qml_module(quickshell-win32-tray
+	URI Quickshell.Services.SystemTray
+	VERSION 0.1
+	DEPENDENCIES QtQuick
+)
+install_qml_module(quickshell-win32-tray)
+target_include_directories(quickshell-win32-tray PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/services)
+target_link_libraries(quickshell-win32-tray PRIVATE Qt::Quick Qt::Gui user32 shell32)
+target_link_libraries(quickshell PRIVATE quickshell-win32-trayplugin)
