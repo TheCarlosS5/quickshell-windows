@@ -4,6 +4,7 @@
 #include <qdir.h>
 #include <qfont.h>
 #include <qfontdatabase.h>
+#include <qicon.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qstandardpaths.h>
@@ -45,6 +46,18 @@ void loadBundledFonts() {
 	QFont::insertSubstitution("Twemoji", "Segoe UI Emoji");
 
 	qCInfo(logFonts) << "Loaded" << loaded << "bundled fonts";
+}
+
+void setupIconThemes() {
+	auto paths = QIcon::themeSearchPaths();
+	paths.prepend(QDir(qEnvironmentVariable("LOCALAPPDATA")).filePath("ii-windows/icons"));
+	paths.prepend(QDir(QCoreApplication::applicationDirPath()).filePath("icons"));
+	QIcon::setThemeSearchPaths(paths);
+	QIcon::setFallbackThemeName("breeze");
+
+	auto theme = qEnvironmentVariable("II_ICON_THEME", "breeze-plus-dark");
+	QIcon::setThemeName(theme);
+	qCInfo(logFonts) << "Icon theme" << theme << "from" << paths.first();
 }
 
 } // namespace qs::win32

@@ -9,6 +9,8 @@
 #include <qsize.h>
 #include <qstring.h>
 
+#include "winapps.hpp"
+
 QPixmap
 IconImageProvider::requestPixmap(const QString& id, QSize* size, const QSize& requestedSize) {
 	QString iconName;
@@ -27,6 +29,15 @@ IconImageProvider::requestPixmap(const QString& id, QSize* size, const QSize& re
 			fallbackName = id.sliced(splitIdx + 10);
 		} else {
 			iconName = id;
+		}
+	}
+
+	if (qs::platform::isAppIconName(iconName)) {
+		auto targetSize = requestedSize.isValid() && !requestedSize.isEmpty() ? requestedSize : QSize(64, 64);
+		auto pixmap = qs::platform::appIconPixmap(iconName, targetSize);
+		if (!pixmap.isNull()) {
+			if (size != nullptr) *size = pixmap.size();
+			return pixmap;
 		}
 	}
 

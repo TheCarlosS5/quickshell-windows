@@ -178,8 +178,9 @@ void WinPanelWindow::setKeyboardFocus(quint8 mode) {
 }
 
 void WinPanelWindow::updateKeyboardGrab() {
-	if (this->mKeyboardFocus != 1 || this->window == nullptr || !this->window->isVisible()) return;
-	// Exclusive focus: take the keyboard as soon as we are shown (e.g. the search field).
+	if (this->mKeyboardFocus == 0 || this->window == nullptr || !this->window->isVisible()) return;
+	// Exclusive and on-demand surfaces get the keyboard when they appear, as on Hyprland
+	// (type straight into the overview search, sidebar fields...).
 	if (auto h = hwnd(this->window)) WindowTracker::forceForeground(h);
 	this->window->requestActivate();
 }

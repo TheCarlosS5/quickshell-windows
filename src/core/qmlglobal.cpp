@@ -24,6 +24,7 @@
 #include <qversionnumber.h>
 #include <qwindowdefs.h>
 #include "platform.hpp"
+#include "winapps.hpp"
 
 #include "../io/processcore.hpp"
 #include "generation.hpp"
@@ -335,7 +336,7 @@ QString QuickshellGlobal::iconPath(const QString& icon) {
 }
 
 QString QuickshellGlobal::iconPath(const QString& icon, bool check) {
-	if (check && QIcon::fromTheme(icon).isNull()) return "";
+	if (check && !qs::platform::isAppIconName(icon) && QIcon::fromTheme(icon).isNull()) return "";
 	return IconImageProvider::requestString(icon);
 }
 
@@ -343,7 +344,9 @@ QString QuickshellGlobal::iconPath(const QString& icon, const QString& fallback)
 	return IconImageProvider::requestString(icon, "", fallback);
 }
 
-bool QuickshellGlobal::hasThemeIcon(const QString& icon) { return QIcon::hasThemeIcon(icon); }
+bool QuickshellGlobal::hasThemeIcon(const QString& icon) {
+	return qs::platform::isAppIconName(icon) || QIcon::hasThemeIcon(icon);
+}
 
 bool QuickshellGlobal::hasVersion(qint32 major, qint32 minor, const QStringList& features) {
 	return qs::scan::env::PreprocEnv::hasVersion(major, minor, features);

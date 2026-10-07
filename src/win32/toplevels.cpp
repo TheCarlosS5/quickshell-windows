@@ -236,18 +236,37 @@ bool WindowTracker::isAppWindow(quintptr handle) {
 void WindowTracker::forceForeground(quintptr handle) {
 	auto* hwnd = toHwnd(handle);
 	if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+	if (GetForegroundWindow() == hwnd) return;
 
-	// Windows only lets the foreground process change the foreground window. Sharing input
-	// state with the current foreground thread for the duration of the call lifts that.
+	// 1. Allowed outright when we already own the foreground or got the last input.
+	if (SetForegroundWindow(hwnd) && GetForegroundWindow() == hwnd) return;
+
+	// 2. Share input state with the current foreground thread for the duration of the call.
 	auto* fg = GetForegroundWindow();
 	auto fgThread = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
 	auto self = GetCurrentThreadId();
 	auto attached = fgThread != 0 && fgThread != self && AttachThreadInput(self, fgThread, TRUE);
-
 	SetForegroundWindow(hwnd);
 	BringWindowToTop(hwnd);
-
 	if (attached) AttachThreadInput(self, fgThread, FALSE);
+	if (GetForegroundWindow() == hwnd) return;
+
+	// 3. Windows lifts the foreground lock while Alt is held. Press Alt, switch, release Alt:
+	//    the previous app only sees Alt-down (no menu, menus open on release) and the
+	//    release lands in our window, where a lone Alt does nothing.
+	INPUT down {};
+	down.type = INPUT_KEYBOARD;
+	down.ki.wVk = VK_MENU;
+	INPUT up = down;
+	up.ki.dwFlags = KEYEVENTF_KEYUP;
+	auto altHeld = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+	if (!altHeld) SendInput(1, &down, sizeof(INPUT));
+	SetForegroundWindow(hwnd);
+	if (!altHeld) SendInput(1, &up, sizeof(INPUT));
+
+	if (GetForegroundWindow() != hwnd) {
+		qWarning() << "Could not move keyboard focus to" << Qt::hex << handle;
+	}
 }
 
 void WindowTracker::refresh() {

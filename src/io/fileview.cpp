@@ -22,6 +22,7 @@
 
 #include "../core/logcat.hpp"
 #include "../core/platform.hpp"
+#include "../core/virtualfiles.hpp"
 #include "../core/util.hpp"
 
 namespace qs::io {
@@ -109,6 +110,13 @@ void FileViewReader::read(
     const QAtomicInteger<bool>& shouldCancel
 ) {
 	qCDebug(logFileView) << "Reader started for" << state.path;
+
+	if (auto content = qs::platform::virtualFile(state.path)) {
+		state.exists = true;
+		state.data = *content;
+		if (doStringConversion) state.data.operator const QString&();
+		return;
+	}
 
 	auto info = QFileInfo(state.path);
 	state.exists = info.exists();

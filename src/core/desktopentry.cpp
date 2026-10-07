@@ -25,6 +25,7 @@
 #include "logcat.hpp"
 #include "model.hpp"
 #include "qmlglobal.hpp"
+#include "winapps.hpp"
 
 namespace {
 QS_LOGGING_CATEGORY(logDesktopEntry, "quickshell.desktopentry", QtWarningMsg);
@@ -360,6 +361,9 @@ void DesktopEntryScanner::run() {
 
 		this->scanDirectory(QDir(path), QString(), scanResults);
 	}
+
+	// Windows has no .desktop files: index what the Start menu lists.
+	scanResults.append(qs::platform::scanInstalledApps());
 
 	QMetaObject::invokeMethod(
 	    this->manager,

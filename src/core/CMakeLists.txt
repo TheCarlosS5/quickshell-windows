@@ -46,6 +46,8 @@ qt_add_library(quickshell-core STATIC
 	streamreader.cpp
 	debuginfo.cpp
 	platform.cpp
+	virtualfiles.cpp
+	winapps.cpp
 )
 
 qt_add_qml_module(quickshell-core

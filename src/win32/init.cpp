@@ -25,6 +25,7 @@ class Win32Plugin: public QsEnginePlugin {
 		if (qEnvironmentVariableIsEmpty("QSG_RENDER_LOOP")) qputenv("QSG_RENDER_LOOP", "basic");
 
 		qs::win32::loadBundledFonts();
+		qs::win32::setupIconThemes();
 
 		// QWindow::setMask is SetWindowRgn on Windows and would clip rendering;
 		// route input masks through cursor-driven click-through instead.
