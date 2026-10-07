@@ -39,7 +39,12 @@ QString QuickshellScreenInfo::name() const {
 		return "{ NULL SCREEN }";
 	}
 
+#ifdef Q_OS_WIN
+	// "\\.\DISPLAY1" -> "DISPLAY1", the name the Hyprland compat monitors use too.
+	return this->screen->name().remove("\\\\.\\");
+#else
 	return this->screen->name();
+#endif
 }
 
 QString QuickshellScreenInfo::model() const {
