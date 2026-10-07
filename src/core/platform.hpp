@@ -43,4 +43,9 @@ int createAnonymousFile(const char* name);
 
 QString lastErrorString();
 
+// Shells often build paths by stripping "file://" from URLs, which on Windows leaves
+// "/C:/dir". That form works as a URL path but not as a filesystem path, so file APIs
+// normalize it to "C:/dir". Identity on other platforms and for other paths.
+QString normalizeLocalPath(const QString& path);
+
 } // namespace qs::platform

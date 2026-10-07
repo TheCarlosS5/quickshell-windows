@@ -70,7 +70,9 @@ QString Process::workingDirectory() const {
 
 void Process::setWorkingDirectory(const QString& workingDirectory) {
 	auto absolute =
-	    workingDirectory.isEmpty() ? workingDirectory : QDir(workingDirectory).absolutePath();
+	    workingDirectory.isEmpty()
+	        ? workingDirectory
+	        : QDir(qs::platform::normalizeLocalPath(workingDirectory)).absolutePath();
 	if (absolute == this->mWorkingDirectory) return;
 	this->mWorkingDirectory = absolute;
 	emit this->workingDirectoryChanged();

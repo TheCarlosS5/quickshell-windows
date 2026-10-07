@@ -21,6 +21,7 @@
 #include <qtypes.h>
 
 #include "../core/logcat.hpp"
+#include "../core/platform.hpp"
 #include "../core/util.hpp"
 
 namespace qs::io {
@@ -463,7 +464,7 @@ void FileView::updateState(FileViewState& newState) {
 QString FileView::path() const { return this->state.path; }
 
 void FileView::setPath(const QString& path) {
-	auto p = path.startsWith("file://") ? path.sliced(7) : path;
+	auto p = qs::platform::normalizeLocalPath(path.startsWith("file://") ? path.sliced(7) : path);
 	if (p == this->targetPath) return;
 
 	if (this->liveWriter()) {

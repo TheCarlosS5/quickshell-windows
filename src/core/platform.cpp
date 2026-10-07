@@ -183,7 +183,16 @@ QString lastErrorString() {
 	return QStringLiteral("error %1: %2").arg(code).arg(QString::fromWCharArray(buf.data()).trimmed());
 }
 
+QString normalizeLocalPath(const QString& path) {
+	if (path.size() >= 3 && (path[0] == '/' || path[0] == '\\') && path[1].isLetter() && path[2] == ':') {
+		return path.sliced(1);
+	}
+	return path;
+}
+
 #else
+
+QString normalizeLocalPath(const QString& path) { return path; }
 
 pid_t currentPid() { return getpid(); }
 

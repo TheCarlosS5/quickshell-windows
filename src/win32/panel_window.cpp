@@ -16,6 +16,7 @@
 #include "../window/panelinterface.hpp"
 #include "../window/proxywindow.hpp"
 #include "native.hpp"
+#include "toplevels.hpp"
 
 namespace qs::win32 {
 
@@ -166,6 +167,20 @@ void WinPanelWindow::updateLayer() {
 	LayerManager::instance()->setLayer(this->window, this->layer());
 }
 
+void WinPanelWindow::setKeyboardFocus(quint8 mode) {
+	if (mode == this->mKeyboardFocus && this->bFocusable == (mode != 0)) return;
+	this->mKeyboardFocus = mode;
+	this->setFocusable(mode != 0);
+	this->updateKeyboardGrab();
+}
+
+void WinPanelWindow::updateKeyboardGrab() {
+	if (this->mKeyboardFocus != 1 || this->window == nullptr || !this->window->isVisible()) return;
+	// Exclusive focus: take the keyboard as soon as we are shown (e.g. the search field).
+	if (auto h = hwnd(this->window)) WindowTracker::forceForeground(h);
+	this->window->requestActivate();
+}
+
 void WinPanelWindow::updateFocusable() {
 	if (this->window == nullptr) return;
 	applyShellWindowStyle(this->window, this->bFocusable);
@@ -265,6 +280,8 @@ void WinPanelWindow::updateDimensions(bool propagate) {
 }
 
 void WinPanelWindow::updatePanelStack() {
+	this->updateKeyboardGrab();
+
 	if (this->window->isVisible()) {
 		WinPanelStack::instance()->addPanel(this);
 	} else {

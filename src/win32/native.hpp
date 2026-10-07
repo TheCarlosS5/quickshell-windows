@@ -115,6 +115,23 @@ private:
 	QRect mReserved;
 };
 
+// Windows session lock/unlock notifications (WTSRegisterSessionNotification).
+class SessionEvents: public QObject {
+	Q_OBJECT;
+
+public:
+	static SessionEvents* instance();
+	void dispatch(quint32 event);
+
+signals:
+	void locked();
+	void unlocked();
+
+private:
+	explicit SessionEvents(QObject* parent = nullptr);
+	quintptr hwnd = 0;
+};
+
 // Routes native messages addressed to our windows (AppBar callbacks) to their owners.
 class NativeEventRouter: public QAbstractNativeEventFilter {
 public:

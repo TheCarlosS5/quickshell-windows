@@ -7,8 +7,11 @@
 #include <qwindow.h>
 
 #include <dwmapi.h>
-#include <shellapi.h>
 #include <windows.h>
+// clang-format off
+#include <shellapi.h>
+#include <wtsapi32.h>
+// clang-format on
 
 #include "../core/logcat.hpp"
 
@@ -312,6 +315,43 @@ void AppBar::handleCallback(quintptr wParam, qintptr lParam) {
 	case ABN_POSCHANGED: this->apply(); break;
 	case ABN_FULLSCREENAPP: emit this->fullscreenAppChanged(lParam != 0); break;
 	default: break;
+	}
+}
+
+// SessionEvents
+
+namespace {
+LRESULT CALLBACK sessionWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	if (msg == WM_WTSSESSION_CHANGE) SessionEvents::instance()->dispatch(static_cast<quint32>(wParam));
+	return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+} // namespace
+
+SessionEvents* SessionEvents::instance() {
+	static auto* events = new SessionEvents(); // NOLINT
+	return events;
+}
+
+SessionEvents::SessionEvents(QObject* parent): QObject(parent) {
+	WNDCLASSW wc {};
+	wc.lpfnWndProc = sessionWndProc;
+	wc.hInstance = GetModuleHandleW(nullptr);
+	wc.lpszClassName = L"QuickshellSessionEvents";
+	RegisterClassW(&wc);
+	auto* h = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
+	this->hwnd = reinterpret_cast<quintptr>(h);
+	if (!WTSRegisterSessionNotification(h, NOTIFY_FOR_THIS_SESSION)) {
+		qCWarning(logWin32) << "WTSRegisterSessionNotification failed" << GetLastError();
+	}
+}
+
+void SessionEvents::dispatch(quint32 event) {
+	if (event == WTS_SESSION_LOCK) {
+		qCInfo(logWin32) << "Session locked";
+		emit this->locked();
+	} else if (event == WTS_SESSION_UNLOCK) {
+		qCInfo(logWin32) << "Session unlocked";
+		emit this->unlocked();
 	}
 }
 

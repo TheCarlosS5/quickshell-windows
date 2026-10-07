@@ -75,6 +75,9 @@ public:
 	[[nodiscard]] Layer layer() const;
 	void setLayer(Layer layer);
 
+	// Layer-shell keyboard focus: 0 none, 1 exclusive (grab while visible), 2 on demand.
+	void setKeyboardFocus(quint8 mode);
+
 signals:
 	QSDOC_HIDE void anchorsChanged();
 	QSDOC_HIDE void exclusiveZoneChanged();
@@ -95,6 +98,7 @@ private:
 	void updateExclusionCb() { this->updateExclusion(); }
 	void updateLayer();
 	void updateFocusable();
+	void updateKeyboardGrab();
 	void updateDimensions(bool propagate = true);
 	void updateDimensionsCb() { this->updateDimensions(); }
 
@@ -102,6 +106,7 @@ private:
 	EngineGeneration* knownGeneration = nullptr;
 	std::unique_ptr<AppBar> appBar;
 	std::optional<Layer> mLayer;
+	quint8 mKeyboardFocus = 0;
 
 	// clang-format off
 	Q_OBJECT_BINDABLE_PROPERTY_WITH_ARGS(WinPanelWindow, bool, bAboveWindows, true, &WinPanelWindow::aboveWindowsChanged);
