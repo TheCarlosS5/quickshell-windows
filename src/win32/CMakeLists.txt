@@ -30,7 +30,7 @@ qt_add_qml_module(quickshell-win32-wayland
 )
 install_qml_module(quickshell-win32-wayland)
 target_include_directories(quickshell-win32-wayland PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/compat)
-target_link_libraries(quickshell-win32-wayland PRIVATE Qt::Quick quickshell-win32)
+target_link_libraries(quickshell-win32-wayland PRIVATE Qt::Quick quickshell-win32 dwmapi)
 target_link_libraries(quickshell PRIVATE quickshell-win32-waylandplugin)
 
 qt_add_library(quickshell-win32-hyprland STATIC compat/hyprland.cpp)

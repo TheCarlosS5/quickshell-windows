@@ -4,7 +4,9 @@
 // Windows equivalents so Wayland-targeting configs (illogical-impulse) load unchanged.
 
 #include <qobject.h>
+#include <qpointer.h>
 #include <qproperty.h>
+#include <qquickwindow.h>
 #include <qqmlcomponent.h>
 #include <qqmlintegration.h>
 #include <qquickitem.h>
@@ -109,7 +111,9 @@ signals:
 	void activeToplevelChanged();
 };
 
-/// Live view of a window or screen. Not wired up yet on Windows (renders nothing).
+/// Live view of a window, drawn by DWM (DwmRegisterThumbnail) over the item's area.
+/// Screens are not supported yet. Note that DWM composites the thumbnail above the
+/// window's own content, so items stacked over the view are covered by it.
 class ScreencopyView: public QQuickItem {
 	Q_OBJECT;
 	// clang-format off
@@ -123,7 +127,9 @@ class ScreencopyView: public QQuickItem {
 	QML_ELEMENT;
 
 public:
-	explicit ScreencopyView(QQuickItem* parent = nullptr): QQuickItem(parent) {}
+	explicit ScreencopyView(QQuickItem* parent = nullptr);
+	~ScreencopyView() override;
+	Q_DISABLE_COPY_MOVE(ScreencopyView);
 
 	[[nodiscard]] QObject* captureSource() const { return this->mSource; }
 	void setCaptureSource(QObject* source);
@@ -131,8 +137,8 @@ public:
 	void setPaintCursor(bool paint);
 	[[nodiscard]] bool live() const { return this->mLive; }
 	void setLive(bool live);
-	[[nodiscard]] bool hasContent() const { return false; }
-	[[nodiscard]] QSize sourceSize() const { return {}; }
+	[[nodiscard]] bool hasContent() const { return this->thumbnail != 0; }
+	[[nodiscard]] QSize sourceSize() const { return this->mSourceSize; }
 	[[nodiscard]] QSizeF constraintSize() const { return this->mConstraint; }
 	void setConstraintSize(QSizeF size);
 
@@ -146,11 +152,24 @@ signals:
 	void sourceSizeChanged();
 	void constraintSizeChanged();
 
+protected:
+	void itemChange(ItemChange change, const ItemChangeData& data) override;
+
+private slots:
+	void updateThumbnail();
+
 private:
+	void registerThumbnail();
+	void unregisterThumbnail();
+
 	QObject* mSource = nullptr;
 	bool mPaintCursor = false;
 	bool mLive = false;
 	QSizeF mConstraint;
+	QSize mSourceSize;
+	quintptr thumbnail = 0;
+	quintptr thumbnailTarget = 0;
+	QPointer<QQuickWindow> trackedWindow;
 };
 
 /// Keeps the display and system awake while enabled (SetThreadExecutionState).
