@@ -140,10 +140,40 @@ QString iconCachePath(const QString& parsingName) {
 	return QDir(dir).filePath(QString::fromLatin1(hash) + ".png");
 }
 
+// Keep Shell's premultiplied BGRA pixels, including alpha. In the deployed Qt
+// build, fromHBITMAP followed by reinterpretAsFormat still made corners opaque.
+QImage imageFromShellBitmap(HBITMAP bitmap) {
+	BITMAP source {};
+	if (!GetObjectW(bitmap, sizeof(source), &source) || source.bmWidth <= 0 || source.bmHeight <= 0)
+		return {};
+	QImage image(source.bmWidth, source.bmHeight, QImage::Format_ARGB32_Premultiplied);
+	if (image.isNull()) return {};
+	BITMAPINFO format {};
+	format.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+	format.bmiHeader.biWidth = source.bmWidth;
+	format.bmiHeader.biHeight = -source.bmHeight; // top-down, like QImage
+	format.bmiHeader.biPlanes = 1;
+	format.bmiHeader.biBitCount = 32;
+	format.bmiHeader.biCompression = BI_RGB;
+	auto dc = GetDC(nullptr);
+	if (!dc) return {};
+	auto rows = GetDIBits(dc, bitmap, 0, source.bmHeight, image.bits(), &format, DIB_RGB_COLORS);
+	ReleaseDC(nullptr, dc);
+	if (rows != source.bmHeight) return {};
+	if (source.bmBitsPixel < 32) {
+		// A legacy bitmap has no alpha channel, so its pixels must be opaque.
+		for (auto y = 0; y < image.height(); ++y) {
+			auto* pixels = reinterpret_cast<QRgb*>(image.scanLine(y));
+			for (auto x = 0; x < image.width(); ++x) pixels[x] |= 0xff000000U;
+		}
+	}
+	return image;
+}
+
 // QImage, not QPixmap: this also runs on the scanner thread.
 QImage shellIcon(const QString& parsingName, QSize size, bool iconOnly = true) {
 	ComPtr<IShellItem> item;
-	auto path = parsingName.startsWith("shell:") || parsingName.contains(":\\")
+	auto path = parsingName.startsWith("shell:") || QFileInfo(parsingName).isAbsolute()
 	              ? parsingName
 	              : "shell:AppsFolder\\" + parsingName;
 	auto wide = path.toStdWString();
@@ -159,7 +189,7 @@ QImage shellIcon(const QString& parsingName, QSize size, bool iconOnly = true) {
 		// No thumbnail (or it failed): the file type's icon.
 		if (iconOnly || FAILED(factory->GetImage(want, SIIGBF_RESIZETOFIT | SIIGBF_ICONONLY, &bitmap))) return {};
 	}
-	auto image = QImage::fromHBITMAP(bitmap);
+	auto image = imageFromShellBitmap(bitmap);
 	DeleteObject(bitmap);
 	if (image.isNull()) return {};
 	return image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
