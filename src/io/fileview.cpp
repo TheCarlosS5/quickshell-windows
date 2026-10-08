@@ -371,30 +371,45 @@ void FileView::operationFinished() {
 	}
 
 	qCDebug(logFileView) << "Async operation finished for" << this;
+	// Done with it before anything is emitted: handlers may start the next operation (e.g. write
+	// defaults when a load fails), which must not be forgotten when this one is cleared.
+	auto* operation = this->liveOperation;
+	auto wasRead = this->liveReader() != nullptr;
+	this->liveOperation = nullptr;
 	this->writeData = FileViewData();
-	this->updateState(this->liveOperation->state);
+	this->updateState(operation->state);
 
-	if (this->liveReader()) {
+	if (wasRead) {
 		if (this->state.error) emit this->loadFailed(this->state.error);
 		else emit this->loaded();
 	} else {
 		if (this->state.error) emit this->saveFailed(this->state.error);
 		else emit this->saved();
-	}
 
-	this->liveOperation = nullptr;
+		// This write created the file, maybe inside directories that didn't exist when the
+		// watcher was set up (a first run): watch again and report the creation, as the
+		// directory watcher does for files created by others.
+		if (!operation->state.error && !operation->state.exists && this->bWatchChanges) {
+			this->updateWatchedFiles();
+			emit this->fileChanged();
+		}
+	}
 }
 
 void FileView::reload() { this->updatePath(); }
 
 bool FileView::waitForJob() {
 	if (this->liveOperation != nullptr) {
-		QObject::disconnect(this->liveOperation, nullptr, this, nullptr);
-		this->liveOperation->block();
+		auto* operation = this->liveOperation;
+		auto wasRead = this->liveReader() != nullptr;
+		QObject::disconnect(operation, nullptr, this, nullptr);
+		operation->block();
+		// Cleared before emitting, as in operationFinished().
+		this->liveOperation = nullptr;
 		this->writeData = FileViewData();
-		this->updateState(this->liveOperation->state);
+		this->updateState(operation->state);
 
-		if (this->liveReader()) {
+		if (wasRead) {
 			if (this->state.error) emit this->loadFailed(this->state.error);
 			else emit this->loaded();
 		} else {
@@ -402,7 +417,6 @@ bool FileView::waitForJob() {
 			else emit this->saved();
 		}
 
-		this->liveOperation = nullptr;
 		return true;
 	} else return false;
 }

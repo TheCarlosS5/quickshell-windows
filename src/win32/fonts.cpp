@@ -2,11 +2,13 @@
 
 #include <qcoreapplication.h>
 #include <qdir.h>
+#include <qfile.h>
 #include <qfont.h>
 #include <qfontdatabase.h>
 #include <qicon.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
+#include <qresource.h>
 #include <qstandardpaths.h>
 
 #include "../core/logcat.hpp"
@@ -52,6 +54,9 @@ void setupIconThemes() {
 	auto paths = QIcon::themeSearchPaths();
 	paths.prepend(QDir(qEnvironmentVariable("LOCALAPPDATA")).filePath("ii-windows/icons"));
 	paths.prepend(QDir(QCoreApplication::applicationDirPath()).filePath("icons"));
+	// Packaged builds ship the themes as one compressed resource (tools/dev/pack_icons.py).
+	auto packed = QDir(QCoreApplication::applicationDirPath()).filePath("icons.rcc");
+	if (QFile::exists(packed) && QResource::registerResource(packed)) paths.prepend(":/icons");
 	QIcon::setThemeSearchPaths(paths);
 	QIcon::setFallbackThemeName("breeze");
 
