@@ -4,6 +4,7 @@
 
 #ifdef _WIN32
 #include <qcryptographichash.h>
+#include <qdatetime.h>
 #include <qdir.h>
 #include <qfileinfo.h>
 #include <qhash.h>
@@ -140,7 +141,7 @@ QString iconCachePath(const QString& parsingName) {
 }
 
 // QImage, not QPixmap: this also runs on the scanner thread.
-QImage shellIcon(const QString& parsingName, QSize size) {
+QImage shellIcon(const QString& parsingName, QSize size, bool iconOnly = true) {
 	ComPtr<IShellItem> item;
 	auto path = parsingName.startsWith("shell:") || parsingName.contains(":\\")
 	              ? parsingName
@@ -153,7 +154,11 @@ QImage shellIcon(const QString& parsingName, QSize size) {
 
 	HBITMAP bitmap = nullptr;
 	SIZE want {std::max(size.width(), 16), std::max(size.height(), 16)};
-	if (FAILED(factory->GetImage(want, SIIGBF_RESIZETOFIT | SIIGBF_ICONONLY, &bitmap))) return {};
+	auto flags = static_cast<SIIGBF>(SIIGBF_RESIZETOFIT | (iconOnly ? SIIGBF_ICONONLY : 0));
+	if (FAILED(factory->GetImage(want, flags, &bitmap))) {
+		// No thumbnail (or it failed): the file type's icon.
+		if (iconOnly || FAILED(factory->GetImage(want, SIIGBF_RESIZETOFIT | SIIGBF_ICONONLY, &bitmap))) return {};
+	}
 	auto image = QImage::fromHBITMAP(bitmap);
 	DeleteObject(bitmap);
 	if (image.isNull()) return {};
@@ -169,9 +174,33 @@ QString appIconName(const QString& parsingName, const QString& exeName) {
 	return "winapp:" + encoded + ':' + exeName;
 }
 
-bool isAppIconName(const QString& name) { return name.startsWith("winapp:"); }
+bool isAppIconName(const QString& name) { return name.startsWith("winapp:") || name.startsWith("winfile:"); }
+
+// "winfile:<path or base64>": what Explorer shows for that file (thumbnail for images and videos, the
+// target's icon for shortcuts, the type's icon otherwise).
+QPixmap fileIconPixmap(const QString& path, QSize size) {
+	static QHash<QString, QPixmap> memo;
+	auto info = QFileInfo(path);
+	auto memoKey = info.absoluteFilePath() + '@' + QString::number(info.lastModified().toMSecsSinceEpoch()) + '@'
+	             + QString::number(size.width());
+	if (auto it = memo.constFind(memoKey); it != memo.constEnd()) return *it;
+
+	auto native = QDir::toNativeSeparators(info.absoluteFilePath());
+	auto image = shellIcon(native, size, false);
+	auto pixmap = image.isNull() ? QPixmap() : QPixmap::fromImage(image.scaled(size, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+	if (memo.size() > 512) memo.clear();
+	memo.insert(memoKey, pixmap);
+	return pixmap;
+}
 
 QPixmap appIconPixmap(const QString& name, QSize size) {
+	if (name.startsWith("winfile:")) {
+		// A raw path ("C:/..."), or the path's UTF-8 in base64 (safe in image:// URLs).
+		auto payload = name.sliced(8);
+		auto path = payload.contains(':') ? payload : QString::fromUtf8(QByteArray::fromBase64(payload.toLatin1()));
+		return fileIconPixmap(path, size);
+	}
+
 	auto parts = name.sliced(7).split(':');
 	auto parsingName = QString::fromUtf8(
 	    QByteArray::fromBase64(parts.value(0).toLatin1(), QByteArray::Base64UrlEncoding)
