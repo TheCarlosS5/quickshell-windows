@@ -1,5 +1,6 @@
 #pragma once
 
+#include <qelapsedtimer.h>
 #include <qlist.h>
 #include <qobject.h>
 #include <qstringlist.h>
@@ -48,6 +49,7 @@ private:
 	void reload();
 	void watch();
 	void step();
+	void clear();
 
 	QList<QUuid> ids;
 	QStringList names;
@@ -57,8 +59,13 @@ private:
 	void* event = nullptr;   // HANDLE
 	QWinEventNotifier* notifier = nullptr;
 
-	// Shortcuts still to send, one at a time so Windows takes each switch.
-	QList<QList<quint16>> pending;
+	// What was asked, done one shortcut at a time, each confirmed by Windows (registry change).
+	qsizetype target = -1; // desktop to end on
+	bool creating = false;
+	QUuid closing;         // desktop to close once it is the current one
+	QUuid returnTo;        // where to go back after closing it
+	bool inFlight = false;
+	QElapsedTimer sentAt;
 	QTimer pacer;
 };
 

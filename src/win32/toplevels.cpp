@@ -251,7 +251,8 @@ bool WindowTracker::isAppWindow(quintptr handle) {
 	// Those last ones are still the user's windows (Hyprland lists all workspaces' windows too).
 	DWORD cloaked = 0;
 	DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
-	if (cloaked != 0 && !VirtualDesktops::instance()->onOtherDesktop(handle)) return false;
+	// Windows on other desktops are cloaked by the shell (not by their app, not inherited).
+	if (cloaked != 0 && (cloaked != DWM_CLOAKED_SHELL || !VirtualDesktops::instance()->onOtherDesktop(handle))) return false;
 
 	if (GetWindowTextLengthW(hwnd) == 0) return false;
 

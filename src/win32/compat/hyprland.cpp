@@ -409,11 +409,12 @@ void HyprlandIpcQml::focusWorkspace(const QString& spec) {
 		qCInfo(logHyprCompat) << "Ignoring workspace" << spec;
 		return;
 	}
-	// As in Hyprland, going to a workspace that does not exist yet creates it.
+	// As in Hyprland, going to a workspace that does not exist yet creates it (one new desktop,
+	// at the end: Windows has no gaps). Win+Ctrl+D also switches to it.
 	auto* desktops = VirtualDesktops::instance();
 	if (index >= desktops->count()) {
-		for (auto i = desktops->count(); i <= index; ++i) desktops->create();
-		return; // Win+Ctrl+D also switches to the new desktop
+		desktops->create();
+		return;
 	}
 	desktops->switchTo(index);
 }
@@ -491,6 +492,10 @@ void HyprlandIpcQml::dispatch(const QString& request) {
 		auto workspaceMatch = workspaceRe.match(body);
 		if (name == "focus" && workspaceMatch.hasMatch()) {
 			HyprlandIpcQml::focusWorkspace(workspaceMatch.captured(1));
+		} else if (name == "ii.desktop.close" && workspaceMatch.hasMatch()) {
+			// ii-windows' own: close a virtual desktop (Hyprland removes empty workspaces itself).
+			auto index = HyprlandIpcQml::workspaceIndex(workspaceMatch.captured(1));
+			if (index >= 0 && index < VirtualDesktops::instance()->count()) VirtualDesktops::instance()->remove(index);
 		} else if (name == "focus" && address) {
 			WindowTracker::forceForeground(address);
 		} else if (name == "window.close" && address) {

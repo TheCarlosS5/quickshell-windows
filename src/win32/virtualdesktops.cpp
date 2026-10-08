@@ -3,6 +3,7 @@
 #include <cstring>
 #include <vector>
 
+#include <qelapsedtimer.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qwineventnotifier.h>
@@ -40,7 +41,7 @@ QUuid uuidFromBytes(const char* bytes) {
 
 // Presses the keys in order and releases them in reverse, as one SendInput: nothing can be left
 // held down halfway.
-void sendChord(const QList<quint16>& keys) {
+bool sendChord(const QList<quint16>& keys) {
 	std::vector<INPUT> inputs;
 	auto add = [&](quint16 vk, bool up) {
 		INPUT in {};
@@ -54,7 +55,17 @@ void sendChord(const QList<quint16>& keys) {
 	};
 	for (auto vk: keys) add(vk, false);
 	for (auto it = keys.crbegin(); it != keys.crend(); ++it) add(*it, true);
-	SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
+	auto sent = SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
+	if (sent == inputs.size()) return true;
+	if (sent > 0) {
+		// Partly sent: release everything (VK 0xE8 first so a lone Win-up doesn't open Start).
+		inputs.clear();
+		add(0xE8, false);
+		add(0xE8, true);
+		for (auto it = keys.crbegin(); it != keys.crend(); ++it) add(*it, true);
+		SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
+	}
+	return false;
 }
 } // namespace
 
@@ -75,15 +86,23 @@ VirtualDesktops::VirtualDesktops(QObject* parent): QObject(parent) {
 
 	this->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 	this->notifier = new QWinEventNotifier(this->event, this);
+	// Re-arm the (one-shot) notification before reading, so a change in between is not lost.
 	QObject::connect(this->notifier, &QWinEventNotifier::activated, this, [this]() {
-		this->reload();
 		this->watch();
+		this->reload();
 	});
-	this->reload();
 	this->watch();
+	this->reload();
 
-	this->pacer.setInterval(180);
+	this->pacer.setInterval(120);
 	QObject::connect(&this->pacer, &QTimer::timeout, this, &VirtualDesktops::step);
+	// Each shortcut sent waits for Windows to show its effect before the next one.
+	QObject::connect(this, &VirtualDesktops::changed, this, [this]() {
+		if (this->inFlight) {
+			this->inFlight = false;
+			this->pacer.start();
+		}
+	});
 }
 
 // Watches the VirtualDesktops key, or, until Explorer creates it, the Explorer key for new subkeys.
@@ -95,7 +114,7 @@ void VirtualDesktops::watch() {
 	if (!exists && RegOpenKeyExW(HKEY_CURRENT_USER, PARENT_PATH, 0, KEY_NOTIFY, &key) != ERROR_SUCCESS) return;
 	this->key = key;
 	auto filter = exists ? REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET : REG_NOTIFY_CHANGE_NAME;
-	RegNotifyChangeKeyValue(key, exists, filter, static_cast<HANDLE>(this->event), TRUE);
+	RegNotifyChangeKeyValue(key, exists, filter | REG_NOTIFY_THREAD_AGNOSTIC, static_cast<HANDLE>(this->event), TRUE);
 }
 
 void VirtualDesktops::reload() {
@@ -107,6 +126,12 @@ void VirtualDesktops::reload() {
 
 	qsizetype current = 0;
 	auto currentId = readBinary(HKEY_CURRENT_USER, KEY_PATH, L"CurrentVirtualDesktop");
+	DWORD session = 0;
+	if (currentId.size() != 16 && ProcessIdToSessionId(GetCurrentProcessId(), &session)) {
+		// Some builds keep the current desktop per logon session.
+		auto path = QString::fromWCharArray(PARENT_PATH) + QString("\SessionInfo\%1\VirtualDesktops").arg(session);
+		currentId = readBinary(HKEY_CURRENT_USER, reinterpret_cast<LPCWSTR>(path.utf16()), L"CurrentVirtualDesktop"); // NOLINT
+	}
 	if (currentId.size() == 16) current = std::max<qsizetype>(0, ids.indexOf(uuidFromBytes(currentId.constData())));
 
 	QStringList names;
@@ -127,7 +152,7 @@ void VirtualDesktops::reload() {
 }
 
 qsizetype VirtualDesktops::desktopOf(quintptr hwnd) const {
-	if (!this->manager) return 0;
+	if (!this->manager) return -1;
 	GUID id {};
 	auto* manager = static_cast<IVirtualDesktopManager*>(this->manager);
 	if (FAILED(manager->GetWindowDesktopId(reinterpret_cast<HWND>(hwnd), &id)) || id == GUID_NULL) return -1; // NOLINT
@@ -144,37 +169,98 @@ bool VirtualDesktops::onOtherDesktop(quintptr hwnd) const {
 }
 
 void VirtualDesktops::switchTo(qsizetype index) {
-	index = std::clamp<qsizetype>(index, 0, this->count() - 1);
-	// From where the queued switches will leave us.
-	auto from = this->mCurrent;
-	for (const auto& chord: this->pending) {
-		if (chord.contains(VK_RIGHT)) ++from;
-		if (chord.contains(VK_LEFT)) --from;
-	}
-	for (auto i = from; i < index; ++i) this->pending.append({VK_LWIN, VK_CONTROL, VK_RIGHT});
-	for (auto i = from; i > index; --i) this->pending.append({VK_LWIN, VK_CONTROL, VK_LEFT});
+	this->target = std::clamp<qsizetype>(index, 0, this->count() - 1);
+	this->closing = QUuid();
+	this->returnTo = QUuid();
 	this->step();
 }
 
 void VirtualDesktops::create() {
-	this->pending.append({VK_LWIN, VK_CONTROL, 'D'});
+	// One at a time: a second request before Windows made the first one is the same request.
+	this->creating = true;
+	this->target = -1;
+	this->closing = QUuid();
+	this->returnTo = QUuid();
 	this->step();
 }
 
 void VirtualDesktops::remove(qsizetype index) {
-	if (this->count() <= 1) return;
-	this->switchTo(index);
-	this->pending.append({VK_LWIN, VK_CONTROL, VK_F4});
+	if (this->count() <= 1 || index < 0 || index >= this->ids.size()) return;
+	// By id: indexes shift if desktops change meanwhile. Like Task View, closing another desktop
+	// leaves the user where they were (Windows only closes the current one: go there and back).
+	this->closing = this->ids.at(index);
+	this->returnTo = index == this->mCurrent ? QUuid() : this->ids.value(this->mCurrent);
+	this->target = index;
 	this->step();
 }
 
+void VirtualDesktops::clear() {
+	this->inFlight = false;
+	this->creating = false;
+	this->target = -1;
+	this->closing = QUuid();
+	this->returnTo = QUuid();
+	this->pacer.stop();
+}
+
+// Sends the next shortcut once Windows showed the previous one's effect (or gave up on it).
 void VirtualDesktops::step() {
-	if (this->pending.isEmpty()) {
+	auto idle = !this->creating && this->target < 0 && this->closing.isNull() && this->returnTo.isNull();
+	if (idle) {
 		this->pacer.stop();
 		return;
 	}
-	if (this->pacer.isActive() && sender() != &this->pacer) return; // the next one is on its way
-	sendChord(this->pending.takeFirst());
+	if (this->inFlight && this->sentAt.elapsed() < 1500) {
+		this->pacer.start(); // still waiting for Windows
+		return;
+	}
+	if (this->inFlight) {
+		// Nothing happened: an elevated app in front can block injected input. Give up.
+		qCWarning(logDesktops) << "Windows did not take the desktop shortcut; giving up";
+		this->clear();
+		return;
+	}
+	// Keys the user holds would mix into the shortcut (and their release would be stolen).
+	for (int vk: {VK_LWIN, VK_RWIN, VK_CONTROL, VK_MENU, VK_SHIFT}) {
+		if (GetAsyncKeyState(vk) & 0x8000) {
+			this->pacer.start();
+			return;
+		}
+	}
+
+	QList<quint16> chord;
+	if (this->creating) {
+		this->creating = false;
+		chord = {VK_LWIN, VK_CONTROL, 'D'};
+	} else if (this->target >= 0 && this->target != this->mCurrent && this->target < this->count()) {
+		chord = {VK_LWIN, VK_CONTROL, static_cast<quint16>(this->target > this->mCurrent ? VK_RIGHT : VK_LEFT)};
+	} else if (!this->closing.isNull() && this->ids.value(this->mCurrent) == this->closing) {
+		this->closing = QUuid();
+		this->target = -1;
+		chord = {VK_LWIN, VK_CONTROL, VK_F4};
+	} else if (!this->closing.isNull() && this->ids.contains(this->closing)) {
+		// The desktop to close moved (another one was closed meanwhile): follow it.
+		this->target = this->ids.indexOf(this->closing);
+		this->pacer.start();
+		return;
+	} else if (!this->returnTo.isNull() && this->ids.contains(this->returnTo) && this->ids.indexOf(this->returnTo) != this->mCurrent) {
+		// Closed: back to where the user was (its index may have shifted).
+		this->target = this->ids.indexOf(this->returnTo);
+		this->returnTo = QUuid();
+		this->pacer.start();
+		return;
+	} else {
+		// Arrived, or the desktop to close is already gone: done.
+		this->clear();
+		return;
+	}
+	if (!sendChord(chord)) {
+		qCWarning(logDesktops) << "SendInput failed; desktop request dropped";
+		this->clear();
+		return;
+	}
+	this->inFlight = true;
+	this->sentAt.start();
 	this->pacer.start();
 }
 
