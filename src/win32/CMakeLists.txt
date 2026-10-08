@@ -102,3 +102,26 @@ install_qml_module(quickshell-win32-tray)
 target_include_directories(quickshell-win32-tray PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/services)
 target_link_libraries(quickshell-win32-tray PRIVATE Qt::Quick Qt::Gui user32 shell32)
 target_link_libraries(quickshell PRIVATE quickshell-win32-trayplugin)
+
+# Hardware services retain the Linux modules' public QML API.
+qt_add_library(quickshell-win32-upower STATIC services/battery.cpp)
+qt_add_qml_module(quickshell-win32-upower URI Quickshell.Services.UPower VERSION 0.1 DEPENDENCIES QtQuick)
+target_include_directories(quickshell-win32-upower PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/services)
+install_qml_module(quickshell-win32-upower)
+target_compile_options(quickshell-win32-upower PRIVATE /EHsc)
+target_link_libraries(quickshell-win32-upower PRIVATE Qt::Quick windowsapp powrprof)
+target_link_libraries(quickshell PRIVATE quickshell-win32-upowerplugin)
+
+qt_add_library(quickshell-win32-bluetooth STATIC services/bluetooth.cpp)
+qt_add_qml_module(quickshell-win32-bluetooth URI Quickshell.Bluetooth VERSION 0.1 DEPENDENCIES QtQuick)
+target_include_directories(quickshell-win32-bluetooth PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/services)
+install_qml_module(quickshell-win32-bluetooth)
+target_compile_options(quickshell-win32-bluetooth PRIVATE /EHsc)
+target_link_libraries(quickshell-win32-bluetooth PRIVATE Qt::Quick windowsapp)
+target_link_libraries(quickshell PRIVATE quickshell-win32-bluetoothplugin)
+
+# Separate console executable; never boots Quickshell or a QGuiApplication.
+qt_add_executable(ii-hardware-test services/hardware_test.cpp services/battery.cpp services/battery.hpp
+	services/bluetooth.cpp services/bluetooth.hpp ../core/model.cpp ../core/model.hpp)
+target_compile_options(ii-hardware-test PRIVATE /EHsc)
+target_link_libraries(ii-hardware-test PRIVATE Qt::Quick windowsapp powrprof)
