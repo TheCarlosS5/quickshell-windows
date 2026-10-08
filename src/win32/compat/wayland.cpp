@@ -166,6 +166,7 @@ void ScreencopyView::registerThumbnail() {
 	if (FAILED(hr)) return;
 	this->thumbnail = reinterpret_cast<quintptr>(thumb);
 	this->thumbnailTarget = target;
+	this->settled = false;
 
 	SIZE size {};
 	if (SUCCEEDED(DwmQueryThumbnailSourceSize(thumb, &size))) {
@@ -197,17 +198,55 @@ void ScreencopyView::updateThumbnail() {
 	for (const QQuickItem* item = this; item; item = item->parentItem()) opacity *= item->opacity();
 
 	auto dpr = window->devicePixelRatio();
-	auto topLeft = this->mapToScene(QPointF(0, 0));
+	auto full = this->mapRectToScene(QRectF(0, 0, this->width(), this->height()));
+
+	// DWM draws the thumbnail over the window, outside Qt's rendering: it ignores the clipping
+	// of ancestors with `clip: true` (a card animating its width would show the thumbnail
+	// sticking out of it). Crop it to what those ancestors let through.
+	auto shown = full;
+	for (const QQuickItem* item = this->parentItem(); item; item = item->parentItem()) {
+		if (item->clip()) shown &= item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+	}
+
+	// A freshly registered thumbnail is first laid out with the size the item had before (e.g.
+	// the previous app's whole row of previews in the dock): DWM would draw the window stretched
+	// across it for a frame. Show it from the next frame on, and only while it is not distorted.
+	auto undistorted = true;
+	if (this->mSourceSize.isValid() && full.height() > 0 && this->mSourceSize.height() > 0) {
+		auto ratio = (full.width() / full.height())
+		           / (static_cast<qreal>(this->mSourceSize.width()) / this->mSourceSize.height());
+		undistorted = ratio > 0.85 && ratio < 1.18;
+	}
+	auto firstFrame = !this->settled;
+	this->settled = true;
+
 	DWM_THUMBNAIL_PROPERTIES props {};
 	props.dwFlags = DWM_TNP_VISIBLE | DWM_TNP_RECTDESTINATION | DWM_TNP_OPACITY;
-	props.fVisible = visible && opacity > 0.01;
+	props.fVisible = visible && opacity > 0.01 && !shown.isEmpty() && undistorted && !firstFrame;
 	props.opacity = static_cast<BYTE>(std::clamp(opacity, 0.0, 1.0) * 255);
 	props.rcDestination = RECT {
-	    static_cast<LONG>(std::lround(topLeft.x() * dpr)),
-	    static_cast<LONG>(std::lround(topLeft.y() * dpr)),
-	    static_cast<LONG>(std::lround((topLeft.x() + this->width()) * dpr)),
-	    static_cast<LONG>(std::lround((topLeft.y() + this->height()) * dpr)),
+	    static_cast<LONG>(std::lround(shown.left() * dpr)),
+	    static_cast<LONG>(std::lround(shown.top() * dpr)),
+	    static_cast<LONG>(std::lround(shown.right() * dpr)),
+	    static_cast<LONG>(std::lround(shown.bottom() * dpr)),
 	};
+	if (shown != full && !shown.isEmpty() && this->mSourceSize.isValid() && full.width() > 0 && full.height() > 0) {
+		// The matching part of the source window, so the visible part keeps its scale.
+		auto sx = this->mSourceSize.width() / full.width();
+		auto sy = this->mSourceSize.height() / full.height();
+		props.dwFlags |= DWM_TNP_RECTSOURCE;
+		props.rcSource = RECT {
+		    static_cast<LONG>(std::lround((shown.left() - full.left()) * sx)),
+		    static_cast<LONG>(std::lround((shown.top() - full.top()) * sy)),
+		    static_cast<LONG>(std::lround((shown.right() - full.left()) * sx)),
+		    static_cast<LONG>(std::lround((shown.bottom() - full.top()) * sy)),
+		};
+	} else {
+		// The whole source again (it may have been cropped before).
+		props.dwFlags |= DWM_TNP_RECTSOURCE | DWM_TNP_SOURCECLIENTAREAONLY;
+		props.fSourceClientAreaOnly = FALSE;
+		props.rcSource = RECT {0, 0, this->mSourceSize.width(), this->mSourceSize.height()};
+	}
 	auto hr = DwmUpdateThumbnailProperties(reinterpret_cast<HTHUMBNAIL>(this->thumbnail), &props); // NOLINT
 	auto rect = QRect(QPoint(props.rcDestination.left, props.rcDestination.top), QPoint(props.rcDestination.right, props.rcDestination.bottom));
 	if (rect != this->lastRect || (props.fVisible != 0) != this->lastVisible || props.opacity != this->lastOpacity) {

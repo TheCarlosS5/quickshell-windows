@@ -66,6 +66,7 @@ struct IconUpdate {
 	bool setHidden = false;
 	bool hidden = false;
 	QString exe; // owner executable path
+	QString guid; // the icon's GUID (NIF_GUID), if it has one
 };
 
 class SystemTrayItem: public QObject {
@@ -81,6 +82,10 @@ class SystemTrayItem: public QObject {
 	Q_PROPERTY(bool hasMenu READ falseValue CONSTANT);
 	Q_PROPERTY(QObject* menu READ nullMenu CONSTANT);
 	Q_PROPERTY(bool onlyMenu READ falseValue CONSTANT);
+	/// Windows-only: the user (or Windows) shows this icon on the taskbar rather than in the
+	/// hidden icons behind the arrow (Settings > Personalization > Taskbar > Other system tray
+	/// icons). Shells can put the others in their overflow menu.
+	Q_PROPERTY(bool promoted READ promoted NOTIFY promotedChanged);
 	QML_ELEMENT;
 	QML_UNCREATABLE("SystemTrayItems can only be acquired from SystemTray");
 
@@ -98,6 +103,11 @@ public:
 	[[nodiscard]] QString tooltipTitle() const { return this->mTip.section('\n', 0, 0); }
 	[[nodiscard]] QString tooltipDescription() const { return this->mTip.section('\n', 1); }
 	[[nodiscard]] bool isHidden() const { return this->mHidden; }
+	[[nodiscard]] bool promoted() const { return this->mPromoted; }
+	[[nodiscard]] QString exe() const { return this->mExe; }
+	[[nodiscard]] QString guid() const { return this->mGuid; }
+	[[nodiscard]] quint32 iconUid() const { return this->uid; }
+	void setPromoted(bool promoted);
 
 	/// Left click.
 	Q_INVOKABLE void activate();
@@ -112,6 +122,7 @@ public:
 signals:
 	void iconChanged();
 	void tooltipChanged();
+	void promotedChanged();
 
 private:
 	void send(quint32 mouseMessage) const;
@@ -122,6 +133,9 @@ private:
 	QString mIcon;
 	QString mTip;
 	bool mHidden = false;
+	bool mPromoted = false;
+	QString mExe;
+	QString mGuid;
 	quint64 hwnd = 0;
 	quint32 uid = 0;
 	quint32 pid = 0;

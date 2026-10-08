@@ -1,6 +1,7 @@
 #include "tray.hpp"
 #include <cstddef>
 #include <cstring>
+#include <functional>
 #include <thread>
 
 #include <qbuffer.h>
@@ -14,9 +15,12 @@
 #include <qloggingcategory.h>
 #include <qurl.h>
 #include <quuid.h>
+#include <qwineventnotifier.h>
 
 #include <windows.h>
+#include <knownfolders.h>
 #include <shellapi.h>
+#include <shlobj.h>
 
 #include "../../core/logcat.hpp"
 
@@ -115,6 +119,111 @@ QString saveIcon(HICON icon) {
 	return QUrl::fromLocalFile(path).toString();
 }
 
+// --- Which icons Windows shows on the taskbar ---------------------------------------------
+
+// HKCU\Control Panel\NotifyIconSettings has one key per icon Explorer has seen: its executable
+// (with a known-folder GUID instead of e.g. "C:\Program Files"), its uID or GUID, and
+// IsPromoted=1 when it is shown on the taskbar instead of behind the arrow. Read only.
+class Promotions: public QObject {
+public:
+	explicit Promotions(QObject* parent): QObject(parent) {
+		this->reload();
+		RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\NotifyIconSettings", 0, KEY_NOTIFY | KEY_READ, &this->key);
+		if (!this->key) return;
+		this->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+		this->notifier = new QWinEventNotifier(this->event, this);
+		QObject::connect(this->notifier, &QWinEventNotifier::activated, this, [this]() {
+			this->reload();
+			this->watch();
+			if (this->changed) this->changed();
+		});
+		this->watch();
+	}
+
+	~Promotions() override {
+		if (this->key) RegCloseKey(this->key);
+		if (this->event) CloseHandle(this->event);
+	}
+	Promotions(const Promotions&) = delete;
+	Promotions& operator=(const Promotions&) = delete;
+
+	[[nodiscard]] bool isPromoted(const QString& exe, quint32 uid, const QString& guid) const {
+		auto path = exe.toLower();
+		for (const auto& entry: this->entries) {
+			if (entry.exe != path) continue;
+			if (!guid.isEmpty() ? entry.guid == guid.toLower() : (entry.guid.isEmpty() && entry.uid == uid)) {
+				return entry.promoted;
+			}
+		}
+		return false; // Windows hides icons it has not been told to show
+	}
+
+	std::function<void()> changed;
+
+private:
+	struct Entry {
+		QString exe;
+		QString guid;
+		quint32 uid = 0;
+		bool promoted = false;
+	};
+
+	void watch() {
+		RegNotifyChangeKeyValue(this->key, TRUE, REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET, this->event, TRUE);
+	}
+
+	// "{6D809377-...}\App\app.exe" -> "c:\program files\app\app.exe"
+	static QString expandKnownFolder(const QString& path) {
+		if (!path.startsWith('{')) return path.toLower();
+		auto end = path.indexOf('}');
+		if (end < 0) return path.toLower();
+		GUID id {};
+		if (FAILED(IIDFromString(reinterpret_cast<LPCOLESTR>(path.left(end + 1).utf16()), &id))) return path.toLower(); // NOLINT
+		PWSTR folder = nullptr;
+		QString result = path;
+		if (SUCCEEDED(SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, nullptr, &folder))) {
+			result = QString::fromWCharArray(folder) + path.mid(end + 1);
+		}
+		CoTaskMemFree(folder);
+		return result.toLower();
+	}
+
+	void reload() {
+		this->entries.clear();
+		HKEY root = nullptr;
+		if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\NotifyIconSettings", 0, KEY_READ, &root) != ERROR_SUCCESS) return;
+		wchar_t name[64];
+		for (DWORD i = 0;; ++i) {
+			DWORD nameLength = 64;
+			if (RegEnumKeyExW(root, i, name, &nameLength, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
+			Entry entry;
+			wchar_t text[MAX_PATH * 2];
+			DWORD size = sizeof(text);
+			if (RegGetValueW(root, name, L"ExecutablePath", RRF_RT_REG_SZ, nullptr, text, &size) != ERROR_SUCCESS) continue;
+			entry.exe = expandKnownFolder(QString::fromWCharArray(text));
+			size = sizeof(text);
+			if (RegGetValueW(root, name, L"IconGuid", RRF_RT_REG_SZ, nullptr, text, &size) == ERROR_SUCCESS) {
+				entry.guid = QString::fromWCharArray(text).toLower();
+			}
+			DWORD value = 0;
+			size = sizeof(value);
+			if (RegGetValueW(root, name, L"UID", RRF_RT_REG_DWORD, nullptr, &value, &size) == ERROR_SUCCESS) entry.uid = value;
+			value = 0;
+			size = sizeof(value);
+			if (RegGetValueW(root, name, L"IsPromoted", RRF_RT_REG_DWORD, nullptr, &value, &size) == ERROR_SUCCESS) {
+				entry.promoted = value != 0;
+			}
+			this->entries.append(entry);
+		}
+		RegCloseKey(root);
+	}
+
+	HKEY key = nullptr;
+	HANDLE event = nullptr;
+	QWinEventNotifier* notifier = nullptr;
+	QList<Entry> entries;
+};
+
 // --- GUI side ---------------------------------------------------------------------------
 
 class Backend: public QObject {
@@ -152,6 +261,7 @@ public:
 		}
 
 		item->apply(update);
+		item->setPromoted(this->promotions->isPromoted(item->exe(), item->iconUid(), item->guid()));
 		auto shown = this->items.valueList().contains(item);
 		if (item->isHidden() && shown) this->items.removeObject(item);
 		else if (!item->isHidden() && !shown) this->items.insertObject(item);
@@ -161,6 +271,7 @@ private:
 	Backend();
 
 	QHash<QString, SystemTrayItem*> all;
+	Promotions* promotions = nullptr;
 };
 
 // --- tray thread ------------------------------------------------------------------------
@@ -373,6 +484,7 @@ private:
 		update.key = byGuid ? QUuid(nid.guidItem).toString() : QString("%1:%2").arg(nid.hWnd).arg(nid.uID);
 		update.hwnd = nid.hWnd;
 		update.uid = nid.uID;
+		if (byGuid) update.guid = update.key;
 		auto* owner = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(nid.hWnd)); // NOLINT
 
 		switch (message.message) {
@@ -465,7 +577,17 @@ private:
 	}
 };
 
-Backend::Backend() { TrayHost::start(); }
+Backend::Backend() {
+	this->promotions = new Promotions(this);
+	// Explorer writes the entry of a new icon shortly after it appears, and the user can change
+	// it in Settings at any time.
+	this->promotions->changed = [this]() {
+		for (auto* item: this->all) {
+			item->setPromoted(this->promotions->isPromoted(item->exe(), item->iconUid(), item->guid()));
+		}
+	};
+	TrayHost::start();
+}
 
 } // namespace
 
@@ -477,7 +599,15 @@ SystemTrayItem::SystemTrayItem(QString key, QString id, QString title, QObject* 
     , mId(std::move(id))
     , mTitle(std::move(title)) {}
 
+void SystemTrayItem::setPromoted(bool promoted) {
+	if (promoted == this->mPromoted) return;
+	this->mPromoted = promoted;
+	emit this->promotedChanged();
+}
+
 void SystemTrayItem::apply(const IconUpdate& update) {
+	if (!update.exe.isEmpty()) this->mExe = update.exe;
+	if (!update.guid.isEmpty()) this->mGuid = update.guid;
 	this->hwnd = update.hwnd;
 	this->uid = update.uid;
 	if (update.pid) this->pid = update.pid;
