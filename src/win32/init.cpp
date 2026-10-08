@@ -31,6 +31,10 @@ class Win32Plugin: public QsEnginePlugin {
 		auto bin = QDir::toNativeSeparators(QDir(QCoreApplication::applicationDirPath()).filePath("bin"));
 		qputenv("PATH", (bin + ';' + qEnvironmentVariable("PATH")).toLocal8Bit());
 
+		// Routes native messages from the start: windows with a custom frame need them even
+		// in processes without panels (e.g. a config's settings app).
+		qs::win32::NativeEventRouter::instance();
+
 		qs::win32::loadBundledFonts();
 		qs::win32::setupIconThemes();
 

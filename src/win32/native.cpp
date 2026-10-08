@@ -3,6 +3,7 @@
 #include <cstddef>
 
 #include <qcoreapplication.h>
+#include <qguiapplication.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qwindow.h>
@@ -11,6 +12,7 @@
 #include <windows.h>
 // clang-format off
 #include <shellapi.h>
+#include <windowsx.h>
 #include <shlwapi.h>
 #include <wtsapi32.h>
 // clang-format on
@@ -19,7 +21,7 @@
 
 namespace qs::win32 {
 
-QS_LOGGING_CATEGORY(logWin32, "quickshell.win32", QtWarningMsg);
+QS_LOGGING_CATEGORY(logWin32, "quickshell.win32", QtInfoMsg);
 QS_LOGGING_CATEGORY(logAppBar, "quickshell.win32.appbar", QtInfoMsg);
 
 namespace {
@@ -59,15 +61,15 @@ void applyShellWindowStyle(QWindow* window, bool focusable) {
 // LayerManager
 
 namespace {
-// The topmost visible window (z-order) that covers the whole monitor belongs to us?
-bool fullscreenWindowIsOurs(quintptr monitor) {
+// The highest visible window covering the whole monitor, if any.
+HWND coveringWindow(quintptr monitor) {
 	MONITORINFO info {};
 	info.cbSize = sizeof(info);
-	if (!GetMonitorInfoW(reinterpret_cast<HMONITOR>(monitor), &info)) return false; // NOLINT
+	if (!GetMonitorInfoW(reinterpret_cast<HMONITOR>(monitor), &info)) return nullptr; // NOLINT
 
 	struct Search {
 		RECT monitor;
-		DWORD pid = 0;
+		HWND found = nullptr;
 	} search {info.rcMonitor};
 
 	EnumWindows(
@@ -77,24 +79,30 @@ bool fullscreenWindowIsOurs(quintptr monitor) {
 		    DWORD cloaked = 0;
 		    DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
 		    if (cloaked) return TRUE;
+		    // Other apps' click-through or tool overlays covering the screen (cursor and FPS
+		    // overlays, screen recorders...) are not something the user is playing or watching.
+		    DWORD pid = 0;
+		    GetWindowThreadProcessId(hwnd, &pid);
+		    auto overlay = WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+		    if (pid != GetCurrentProcessId() && (GetWindowLongW(hwnd, GWL_EXSTYLE) & overlay)) return TRUE;
 		    RECT r;
 		    GetWindowRect(hwnd, &r);
 		    if (r.left <= s->monitor.left && r.top <= s->monitor.top && r.right >= s->monitor.right
 		        && r.bottom >= s->monitor.bottom)
 		    {
-			    GetWindowThreadProcessId(hwnd, &s->pid);
+			    s->found = hwnd;
 			    return FALSE;
 		    }
 		    return TRUE;
 	    },
 	    reinterpret_cast<LPARAM>(&search) // NOLINT
 	);
-
-	return search.pid == GetCurrentProcessId();
+	return search.found;
 }
 
 void CALLBACK onForegroundChanged(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
 	QMetaObject::invokeMethod(LayerManager::instance(), &LayerManager::restackDesktop, Qt::QueuedConnection);
+	QMetaObject::invokeMethod(LayerManager::instance(), &LayerManager::updateFullscreen, Qt::QueuedConnection);
 }
 } // namespace
 
@@ -222,34 +230,61 @@ void LayerManager::setYieldsToFullscreen(QWindow* window, bool yields) {
 }
 
 void LayerManager::setFullscreenAppActive(quintptr monitor, bool active) {
-	if (active == this->fullscreenMonitors.contains(monitor)) return;
-
-	// Our own full-screen surfaces (overview, session menu) also trigger ABN_FULLSCREENAPP;
-	// only real applications (games, video players) should push the shell aside.
-	if (active && fullscreenWindowIsOurs(monitor)) {
-		qCInfo(logWin32) << "Ignoring fullscreen notification for our own window";
-		return;
-	}
-	qCInfo(logWin32) << "Fullscreen app" << (active ? "entered" : "left") << "monitor" << monitor;
-
 	if (active) {
-		this->fullscreenMonitors.append(monitor);
-
-		// Leaving the topmost band needs an explicit HWND_NOTOPMOST first.
-		for (auto [window, layer]: this->layers.asKeyValueRange()) {
-			if (!this->yields(window, layer)) continue;
-			auto h = toHwnd(hwnd(window));
-			if (!h) continue;
-			if (reinterpret_cast<quintptr>(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST)) != monitor) {
-				continue;
-			}
-			SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-		}
+		if (!this->reportedFullscreen.contains(monitor)) this->reportedFullscreen.append(monitor);
 	} else {
-		this->fullscreenMonitors.removeAll(monitor);
+		this->reportedFullscreen.removeAll(monitor);
 	}
+	this->updateFullscreen();
+}
 
-	this->restack();
+// The shell steps aside on a monitor while Explorer reports a fullscreen app there and the
+// highest window covering that monitor is another app's (a game, a video). Our own full-screen
+// surfaces trigger the report too: the desktop (activated by a click, or when the app in front
+// is minimized) means there is no fullscreen app; the overlay or the overview opened over a
+// game leave the state as it was. Re-checked on every foreground change, so a stale report
+// never leaves the bar and the dock hidden.
+void LayerManager::updateFullscreen() {
+	auto changed = false;
+	auto mine = [](HWND hwnd) {
+		DWORD pid = 0;
+		GetWindowThreadProcessId(hwnd, &pid);
+		return pid == GetCurrentProcessId();
+	};
+
+	for (auto monitor: QList<quintptr>(this->fullscreenMonitors)) {
+		auto* top = coveringWindow(monitor);
+		auto keep = this->reportedFullscreen.contains(monitor) && top
+		         && (!mine(top) || !this->isDesktopLayer(reinterpret_cast<quintptr>(top)));
+		if (keep) continue;
+		qCInfo(logWin32) << "Fullscreen app left monitor" << monitor;
+		this->fullscreenMonitors.removeAll(monitor);
+		changed = true;
+	}
+	for (auto monitor: this->reportedFullscreen) {
+		if (this->fullscreenMonitors.contains(monitor)) continue;
+		auto* top = coveringWindow(monitor);
+		if (!top || mine(top)) continue;
+		qCInfo(logWin32) << "Fullscreen app entered monitor" << monitor;
+		this->enterFullscreen(monitor);
+		changed = true;
+	}
+	if (changed) this->restack();
+}
+
+void LayerManager::enterFullscreen(quintptr monitor) {
+	this->fullscreenMonitors.append(monitor);
+
+	// Leaving the topmost band needs an explicit HWND_NOTOPMOST first.
+	for (auto [window, layer]: this->layers.asKeyValueRange()) {
+		if (!this->yields(window, layer)) continue;
+		auto h = toHwnd(hwnd(window));
+		if (!h) continue;
+		if (reinterpret_cast<quintptr>(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST)) != monitor) {
+			continue;
+		}
+		SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+	}
 }
 
 // InputRegions
@@ -645,13 +680,68 @@ quint32 NativeEventRouter::appBarMessage() {
 void NativeEventRouter::addAppBar(quintptr hwnd, AppBar* bar) { this->appBars.insert(hwnd, bar); }
 void NativeEventRouter::removeAppBar(quintptr hwnd) { this->appBars.remove(hwnd); }
 
+namespace {
+// A window that draws its own title bar: QML declares `property bool customTitleBar: true` on it
+// (ii's settings app). It keeps a real Windows frame (shadow, rounded corners, Snap, resizable
+// edges) but no caption: the client area extends over the caption, and the top edge resizes.
+bool hasCustomTitleBar(HWND hwnd) {
+	for (auto* window: QGuiApplication::topLevelWindows()) {
+		// handle() first: winId() would create a window that is still being created.
+		if (window->handle() == nullptr) continue;
+		if (reinterpret_cast<HWND>(window->winId()) == hwnd) return window->property("customTitleBar").toBool(); // NOLINT
+	}
+	return false;
+}
+
+int resizeBorder(HWND hwnd) {
+	auto dpi = GetDpiForWindow(hwnd);
+	return GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+}
+
+bool customTitleBarMessage(MSG* msg, qintptr* result) {
+	// The frame is computed during CreateWindowEx, before Qt knows the window: recompute it once
+	// the window is about to be shown.
+	if (msg->message == WM_SHOWWINDOW && msg->wParam == TRUE && hasCustomTitleBar(msg->hwnd)) {
+		SetWindowPos(msg->hwnd, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+		return false;
+	}
+	if (msg->message == WM_NCCALCSIZE && msg->wParam == TRUE) {
+		if (!hasCustomTitleBar(msg->hwnd)) return false;
+		auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(msg->lParam); // NOLINT
+		auto top = params->rgrc[0].top;
+		*result = DefWindowProcW(msg->hwnd, msg->message, msg->wParam, msg->lParam);
+		// Left, right and bottom keep their borders; the caption goes. Maximized windows
+		// overhang the screen by the border, which must not cut the top of the content.
+		params->rgrc[0].top = top + (IsZoomed(msg->hwnd) ? resizeBorder(msg->hwnd) : 0);
+		return true;
+	}
+	if (msg->message == WM_NCHITTEST) {
+		if (!hasCustomTitleBar(msg->hwnd)) return false;
+		auto hit = DefWindowProcW(msg->hwnd, msg->message, msg->wParam, msg->lParam);
+		if (hit == HTCLIENT && !IsZoomed(msg->hwnd)) {
+			RECT r;
+			GetWindowRect(msg->hwnd, &r);
+			auto y = GET_Y_LPARAM(msg->lParam);
+			auto x = GET_X_LPARAM(msg->lParam);
+			auto border = resizeBorder(msg->hwnd);
+			if (y < r.top + border) hit = x < r.left + 2 * border ? HTTOPLEFT : x >= r.right - 2 * border ? HTTOPRIGHT : HTTOP;
+		}
+		*result = hit;
+		return true;
+	}
+	return false;
+}
+} // namespace
+
 bool NativeEventRouter::nativeEventFilter(
     const QByteArray& eventType,
     void* message,
-    qintptr* /*result*/
+    qintptr* result
 ) {
 	if (eventType != "windows_generic_MSG") return false;
 	auto* msg = static_cast<MSG*>(message);
+
+	if (customTitleBarMessage(msg, result)) return true;
 
 	// Activating a window (a click on the desktop gives it the keyboard) raises it to the top
 	// of the normal band, over every app. Desktop-layer windows keep their place instead;

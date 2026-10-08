@@ -45,6 +45,8 @@ public:
 	void remove(QWindow* window);
 	// Temporarily drops Top-layer windows on a monitor below everything (fullscreen apps).
 	void setFullscreenAppActive(quintptr monitor, bool active);
+	// Re-evaluates which monitors have a real fullscreen app (see native.cpp).
+	void updateFullscreen();
 	// Overlay-layer windows that step aside for fullscreen apps too (notification popups,
 	// screen corners), unlike ones the user opens on purpose (overlay, session menu).
 	void setYieldsToFullscreen(QWindow* window, bool yields);
@@ -57,13 +59,15 @@ public:
 private:
 	explicit LayerManager(QObject* parent = nullptr);
 	void apply(QWindow* window, Layer layer);
+	void enterFullscreen(quintptr monitor);
 	[[nodiscard]] bool yields(QWindow* window, Layer layer) const {
 		return layer == Layer::Top || this->yielding.contains(window);
 	}
 
 	QHash<QWindow*, Layer> layers;
 	QSet<QWindow*> yielding;
-	QList<quintptr> fullscreenMonitors;
+	QList<quintptr> fullscreenMonitors;  // effective: the shell steps aside there
+	QList<quintptr> reportedFullscreen;  // what Explorer last reported
 };
 
 // Input regions without clipping rendering. QWindow::setMask maps to SetWindowRgn on
