@@ -72,7 +72,12 @@ void IpcServerConnection::onReadyRead() {
 	this->stream.startTransaction();
 	IpcCommand command;
 	this->stream >> command;
-	if (!this->stream.commitTransaction()) return;
+	if (!this->stream.commitTransaction()) {
+		// Incomplete (it can arrive in pieces, e.g. over Windows named pipes): close the outer
+		// transaction too, so the next readyRead starts over from the same bytes.
+		this->stream.rollbackTransaction();
+		return;
+	}
 
 	std::visit(
 	    [this]<typename Command>(Command& command) {
@@ -90,7 +95,13 @@ void IpcServerConnection::onReadyRead() {
 
 	// async connections reparent
 	if (dynamic_cast<IpcServer*>(this->parent()) != nullptr) {
+#ifdef Q_OS_WIN
+		// Destroying the socket drops pipe writes still in flight (the reply): close gracefully
+		// instead, onDisconnected() deletes us once the reply is out.
+		this->socket->disconnectFromServer();
+#else
 		this->deleteLater();
+#endif
 	}
 }
 

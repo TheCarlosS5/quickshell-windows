@@ -187,8 +187,21 @@ public:
 
 	template <typename T>
 	void sendMessage(const T& message) {
+#ifdef Q_OS_WIN
+		// One write per message (QDataStream on the socket writes field by field, and each write
+		// is a separate chunk on a named pipe), and wait for it: without an event loop, pipe
+		// writes are only started by flush().
+		QByteArray bytes;
+		QDataStream buffer(&bytes, QIODevice::WriteOnly);
+		buffer.setVersion(this->stream.version());
+		buffer << message;
+		this->socket.write(bytes);
+		this->socket.flush();
+		this->socket.waitForBytesWritten(-1);
+#else
 		this->stream << message;
 		this->socket.flush();
+#endif
 	}
 
 	template <typename T>
