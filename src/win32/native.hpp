@@ -51,6 +51,8 @@ public:
 	void restack();
 	// Puts desktop-layer windows back right above Progman (z-order drifts as apps activate).
 	void restackDesktop();
+	// A visible Background/Bottom-layer window (kept above Progman, under every app).
+	[[nodiscard]] bool isDesktopLayer(quintptr hwnd) const;
 
 private:
 	explicit LayerManager(QObject* parent = nullptr);

@@ -40,6 +40,9 @@ void applyShellWindowStyle(QWindow* window, bool focusable) {
 	flags |= Qt::FramelessWindowHint | Qt::Tool | Qt::NoDropShadowWindowHint;
 	flags.setFlag(Qt::WindowDoesNotAcceptFocus, !focusable);
 	window->setFlags(flags);
+	// Focusable panels (the desktop) take the keyboard when clicked, never just by appearing:
+	// keyboard grabs activate explicitly (WinPanelWindow::updateKeyboardGrab).
+	window->setProperty("_q_showWithoutActivating", true);
 
 	auto h = toHwnd(hwnd(window));
 	if (!h) return;
@@ -96,6 +99,8 @@ void CALLBACK onForegroundChanged(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD,
 } // namespace
 
 LayerManager::LayerManager(QObject* parent): QObject(parent) {
+	// Keeps focusable desktop-layer windows in place when they are activated (see the router).
+	NativeEventRouter::instance();
 	// Out-of-context hook, nothing injected.
 	SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, onForegroundChanged, 0, 0, WINEVENT_OUTOFCONTEXT);
 }
@@ -173,6 +178,14 @@ void LayerManager::restackDesktop() {
 		SetWindowPos(h, insertAfter, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
 		insertAfter = h;
 	}
+}
+
+bool LayerManager::isDesktopLayer(quintptr hwnd) const {
+	for (auto [window, layer]: this->layers.asKeyValueRange()) {
+		if (layer != Layer::Bottom && layer != Layer::Background) continue;
+		if (qs::win32::hwnd(window) == hwnd) return true;
+	}
+	return false;
 }
 
 void LayerManager::restack() {
@@ -639,6 +652,20 @@ bool NativeEventRouter::nativeEventFilter(
 ) {
 	if (eventType != "windows_generic_MSG") return false;
 	auto* msg = static_cast<MSG*>(message);
+
+	// Activating a window (a click on the desktop gives it the keyboard) raises it to the top
+	// of the normal band, over every app. Desktop-layer windows keep their place instead;
+	// only our own restacking (an explicit window to insert after) moves them.
+	if (msg->message == WM_WINDOWPOSCHANGING) {
+		auto* pos = reinterpret_cast<WINDOWPOS*>(msg->lParam); // NOLINT
+		if (!(pos->flags & SWP_NOZORDER) && pos->hwndInsertAfter == HWND_TOP
+		    && !(GetWindowLongW(msg->hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)
+		    && LayerManager::instance()->isDesktopLayer(reinterpret_cast<quintptr>(msg->hwnd)))
+		{
+			pos->flags |= SWP_NOZORDER;
+		}
+		return false;
+	}
 
 	if (msg->message == NativeEventRouter::appBarMessage()) {
 		if (auto* bar = this->appBars.value(reinterpret_cast<quintptr>(msg->hwnd))) {
