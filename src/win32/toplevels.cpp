@@ -122,6 +122,9 @@ bool WindowHandle::refresh(quintptr foreground) {
 	auto appId = appUserModelId(h);
 	if (appId.isEmpty()) appId = packagedAppUserModelId(static_cast<DWORD>(this->mPid));
 	if (appId.isEmpty()) appId = QFileInfo(this->mExecutable).completeBaseName();
+	// File Explorer windows carry no id of their own; the Start menu (and the dock pin) knows
+	// Explorer by this one.
+	if (appId.compare("explorer", Qt::CaseInsensitive) == 0) appId = "Microsoft.Windows.Explorer";
 	if (appId != this->mAppId) {
 		this->mAppId = appId;
 		emit this->appIdChanged();

@@ -83,6 +83,14 @@ WindowHandle* ToplevelManagerQml::activeToplevel() { return WindowTracker::insta
 // ScreencopyView
 
 ScreencopyView::ScreencopyView(QQuickItem* parent): QQuickItem(parent) {
+	// Popups move their content between native windows as they open, without telling the items
+	// in a way we can rely on: while there is a source, check the item's window and follow it.
+	this->poll.setInterval(33);
+	QObject::connect(&this->poll, &QTimer::timeout, this, [this]() {
+		if (this->window() != this->trackedWindow.data()) this->trackWindow(this->window());
+		else if (!this->thumbnail && this->trackedWindow) this->registerThumbnail();
+		else this->updateThumbnail();
+	});
 	QObject::connect(this, &QQuickItem::visibleChanged, this, &ScreencopyView::updateThumbnail);
 	QObject::connect(this, &QQuickItem::opacityChanged, this, &ScreencopyView::updateThumbnail);
 }
@@ -92,6 +100,8 @@ ScreencopyView::~ScreencopyView() { this->unregisterThumbnail(); }
 void ScreencopyView::setCaptureSource(QObject* source) {
 	if (source == this->mSource) return;
 	this->mSource = source;
+	if (source) this->poll.start();
+	else this->poll.stop();
 	this->registerThumbnail();
 	emit this->captureSourceChanged();
 }
@@ -99,13 +109,23 @@ void ScreencopyView::setCaptureSource(QObject* source) {
 void ScreencopyView::itemChange(ItemChange change, const ItemChangeData& data) {
 	QQuickItem::itemChange(change, data);
 	if (change != ItemSceneChange) return;
+	this->trackWindow(data.window);
+}
 
+void ScreencopyView::trackWindow(QQuickWindow* window) {
 	if (this->trackedWindow) QObject::disconnect(this->trackedWindow, nullptr, this, nullptr);
-	this->trackedWindow = data.window;
-	if (data.window) {
+	this->trackedWindow = window;
+	if (window) {
 		// Follow the item every frame (animations move previews around in the overview).
-		QObject::connect(data.window, &QQuickWindow::afterAnimating, this, &ScreencopyView::updateThumbnail);
-		QObject::connect(data.window, &QWindow::visibleChanged, this, &ScreencopyView::updateThumbnail);
+		QObject::connect(window, &QQuickWindow::afterAnimating, this, &ScreencopyView::updateThumbnail);
+		// Not every change animates this window (a popup fading in through an ancestor's
+		// opacity): follow every frame it draws too. Emitted on the render thread.
+		QObject::connect(window, &QQuickWindow::frameSwapped, this, &ScreencopyView::updateThumbnail, Qt::QueuedConnection);
+		// Popups (the dock's previews) get their native window only when first shown.
+		QObject::connect(window, &QWindow::visibleChanged, this, [this]() {
+			if (!this->thumbnail) this->registerThumbnail();
+			else this->updateThumbnail();
+		});
 	}
 	this->registerThumbnail();
 }
@@ -117,12 +137,33 @@ void ScreencopyView::registerThumbnail() {
 	auto source = handle ? static_cast<quintptr>(handle->hwnd()) : 0;
 
 	this->unregisterThumbnail();
+
+	// Known before DWM is involved, so a popup can size itself before it is shown.
+	if (source) {
+		auto* sourceHwnd = reinterpret_cast<HWND>(source); // NOLINT
+		RECT rect {};
+		WINDOWPLACEMENT placement {};
+		placement.length = sizeof(placement);
+		// A minimized window's rect is a tiny caption off-screen: use its restored size.
+		auto ok = IsIconic(sourceHwnd) && GetWindowPlacement(sourceHwnd, &placement)
+		            ? (rect = placement.rcNormalPosition, true)
+		            : GetWindowRect(sourceHwnd, &rect) != 0;
+		if (ok) {
+			auto size = QSize(rect.right - rect.left, rect.bottom - rect.top);
+			if (size.isValid() && size != this->mSourceSize) {
+				this->mSourceSize = size;
+				emit this->sourceSizeChanged();
+				this->updateImplicitSize();
+			}
+		}
+	}
+
 	if (!target || !source) return;
 
 	HTHUMBNAIL thumb = nullptr;
-	if (FAILED(DwmRegisterThumbnail(reinterpret_cast<HWND>(target), reinterpret_cast<HWND>(source), &thumb))) { // NOLINT
-		return;
-	}
+	auto hr = DwmRegisterThumbnail(reinterpret_cast<HWND>(target), reinterpret_cast<HWND>(source), &thumb); // NOLINT
+	qCDebug(logCompat) << "thumbnail" << Qt::hex << source << "->" << target << "hr" << static_cast<quint32>(hr);
+	if (FAILED(hr)) return;
 	this->thumbnail = reinterpret_cast<quintptr>(thumb);
 	this->thumbnailTarget = target;
 
@@ -130,6 +171,7 @@ void ScreencopyView::registerThumbnail() {
 	if (SUCCEEDED(DwmQueryThumbnailSourceSize(thumb, &size))) {
 		this->mSourceSize = QSize(size.cx, size.cy);
 		emit this->sourceSizeChanged();
+		this->updateImplicitSize();
 	}
 	emit this->hasContentChanged();
 	this->updateThumbnail();
@@ -148,7 +190,9 @@ void ScreencopyView::updateThumbnail() {
 	auto* window = this->trackedWindow.data();
 
 	// Effective visibility and opacity through the item's ancestors.
-	auto visible = window->isVisible() && this->isVisible() && this->width() > 0 && this->height() > 0;
+	// The native window's visibility: popups are shown by the backend without QWindow knowing.
+	auto visible = IsWindowVisible(reinterpret_cast<HWND>(this->thumbnailTarget)) && this->isVisible() // NOLINT
+	            && this->width() > 0 && this->height() > 0;
 	qreal opacity = 1;
 	for (const QQuickItem* item = this; item; item = item->parentItem()) opacity *= item->opacity();
 
@@ -164,7 +208,14 @@ void ScreencopyView::updateThumbnail() {
 	    static_cast<LONG>(std::lround((topLeft.x() + this->width()) * dpr)),
 	    static_cast<LONG>(std::lround((topLeft.y() + this->height()) * dpr)),
 	};
-	DwmUpdateThumbnailProperties(reinterpret_cast<HTHUMBNAIL>(this->thumbnail), &props); // NOLINT
+	auto hr = DwmUpdateThumbnailProperties(reinterpret_cast<HTHUMBNAIL>(this->thumbnail), &props); // NOLINT
+	auto rect = QRect(QPoint(props.rcDestination.left, props.rcDestination.top), QPoint(props.rcDestination.right, props.rcDestination.bottom));
+	if (rect != this->lastRect || (props.fVisible != 0) != this->lastVisible || props.opacity != this->lastOpacity) {
+		this->lastOpacity = props.opacity;
+		qCDebug(logCompat) << "thumbnail" << Qt::hex << this->thumbnail << Qt::dec << "rect" << rect << "visible" << props.fVisible << "opacity" << props.opacity << "hr" << Qt::hex << static_cast<quint32>(hr);
+		this->lastRect = rect;
+		this->lastVisible = props.fVisible != 0;
+	}
 }
 
 void ScreencopyView::setPaintCursor(bool paint) {
@@ -183,6 +234,23 @@ void ScreencopyView::setConstraintSize(QSizeF size) {
 	if (size == this->mConstraint) return;
 	this->mConstraint = size;
 	emit this->constraintSizeChanged();
+	this->updateImplicitSize();
+}
+
+// As on Wayland: the window's size, scaled down to fit the constraint (dock previews size
+// themselves from this).
+void ScreencopyView::updateImplicitSize() {
+	auto size = this->mSourceSize.toSizeF();
+	if (size.isEmpty()) return;
+	auto constraint = this->mConstraint;
+	if (constraint.width() > 0 && constraint.height() > 0) {
+		size.scale(constraint, Qt::KeepAspectRatio);
+	} else if (constraint.width() > 0) {
+		size = QSizeF(constraint.width(), size.height() * constraint.width() / size.width());
+	} else if (constraint.height() > 0) {
+		size = QSizeF(size.width() * constraint.height() / size.height(), constraint.height());
+	}
+	this->setImplicitSize(size.width(), size.height());
 }
 
 // IdleInhibitor

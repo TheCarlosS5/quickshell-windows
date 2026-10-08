@@ -6,6 +6,7 @@
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qprocess.h>
+#include <qregularexpression.h>
 #include <qscreen.h>
 #include <qwindow.h>
 
@@ -406,6 +407,33 @@ HyprlandMonitor* HyprlandIpcQml::monitorFor(QuickshellScreenInfo* screen) {
 
 void HyprlandIpcQml::dispatch(const QString& request) {
 	auto trimmed = request.trimmed();
+
+	// Hyprland's newer Lua-style dispatchers, which current ii uses:
+	//   hl.dsp.focus({window = "address:0x..."}), hl.dsp.window.close({...}), hl.dsp.global("name")
+	if (trimmed.startsWith("hl.dsp.")) {
+		auto open = trimmed.indexOf('(');
+		auto name = trimmed.mid(7, open < 0 ? -1 : open - 7);
+		auto body = open < 0 ? QString() : trimmed.mid(open + 1, trimmed.lastIndexOf(')') - open - 1);
+		static const QRegularExpression addressRe(R"(address:(0x)?([0-9a-fA-F]+))");
+		auto match = addressRe.match(body);
+		auto address = match.hasMatch() ? static_cast<quintptr>(match.captured(2).toULongLong(nullptr, 16)) : 0;
+
+		if (name == "focus" && address) {
+			WindowTracker::forceForeground(address);
+		} else if (name == "window.close" && address) {
+			PostMessageW(reinterpret_cast<HWND>(address), WM_CLOSE, 0, 0); // NOLINT
+		} else if (name == "global") {
+			auto shortcut = body.trimmed();
+			shortcut.remove('"');
+			GlobalShortcut::dispatch(shortcut, true);
+			GlobalShortcut::dispatch(shortcut, false);
+		} else {
+			// Workspaces, moving and pinning windows are window management; Windows keeps that.
+			qCInfo(logHyprCompat) << "Ignoring unsupported dispatcher:" << request;
+		}
+		return;
+	}
+
 	auto space = trimmed.indexOf(' ');
 	auto dispatcher = space < 0 ? trimmed : trimmed.left(space);
 	auto args = space < 0 ? QString() : trimmed.mid(space + 1).trimmed();

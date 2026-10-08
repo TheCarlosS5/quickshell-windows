@@ -10,7 +10,9 @@
 #include <qqmlcomponent.h>
 #include <qqmlintegration.h>
 #include <qquickitem.h>
+#include <qrect.h>
 #include <qsize.h>
+#include <qtimer.h>
 #include <qtmetamacros.h>
 
 #include "../../core/model.hpp"
@@ -161,6 +163,8 @@ private slots:
 private:
 	void registerThumbnail();
 	void unregisterThumbnail();
+	void updateImplicitSize();
+	void trackWindow(QQuickWindow* window);
 
 	QObject* mSource = nullptr;
 	bool mPaintCursor = false;
@@ -170,6 +174,10 @@ private:
 	quintptr thumbnail = 0;
 	quintptr thumbnailTarget = 0;
 	QPointer<QQuickWindow> trackedWindow;
+	QTimer poll;
+	QRect lastRect;
+	bool lastVisible = false;
+	quint8 lastOpacity = 0;
 };
 
 /// Keeps the display and system awake while enabled (SetThreadExecutionState).
