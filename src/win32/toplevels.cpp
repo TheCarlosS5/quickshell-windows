@@ -9,6 +9,7 @@
 #include <dwmapi.h>
 #include <windows.h>
 // clang-format off
+#include <appmodel.h>
 #include <propkey.h>
 #include <propsys.h>
 #include <shellapi.h>
@@ -59,6 +60,19 @@ QString appUserModelId(HWND hwnd) {
 	return id;
 }
 
+// Packaged apps (Windows Terminal, for one) often leave the window property unset; the
+// process itself still knows its AppUserModelID, which is what the Start menu lists.
+QString packagedAppUserModelId(DWORD pid) {
+	auto* proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+	if (!proc) return {};
+	std::array<wchar_t, APPLICATION_USER_MODEL_ID_MAX_LENGTH> buf {};
+	auto size = static_cast<UINT32>(buf.size());
+	QString id;
+	if (GetApplicationUserModelId(proc, &size, buf.data()) == ERROR_SUCCESS) id = QString::fromWCharArray(buf.data());
+	CloseHandle(proc);
+	return id;
+}
+
 QuickshellScreenInfo* screenOf(HWND hwnd) {
 	MONITORINFOEXW info {};
 	info.cbSize = sizeof(info);
@@ -106,6 +120,7 @@ bool WindowHandle::refresh(quintptr foreground) {
 	// Prefer the AppUserModelID (what the taskbar groups by); fall back to the exe name,
 	// which is what most desktop-entry style lookups expect.
 	auto appId = appUserModelId(h);
+	if (appId.isEmpty()) appId = packagedAppUserModelId(static_cast<DWORD>(this->mPid));
 	if (appId.isEmpty()) appId = QFileInfo(this->mExecutable).completeBaseName();
 	if (appId != this->mAppId) {
 		this->mAppId = appId;
