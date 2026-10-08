@@ -2,6 +2,7 @@ qt_add_library(quickshell-win32 STATIC
 	native.cpp
 	panel_window.cpp
 	toplevels.cpp
+	virtualdesktops.cpp
 )
 
 qt_add_qml_module(quickshell-win32

@@ -36,6 +36,8 @@ class WindowHandle: public QObject {
 	Q_PROPERTY(QString executable READ executable CONSTANT);
 	Q_PROPERTY(qint64 pid READ pid CONSTANT);
 	Q_PROPERTY(QRect geometry READ geometry NOTIFY geometryChanged);
+	/// Index of the virtual desktop the window is on (-1: unknown or on all of them).
+	Q_PROPERTY(qint32 desktop READ desktop NOTIFY desktopChanged);
 	// clang-format on
 
 public:
@@ -53,6 +55,7 @@ public:
 	[[nodiscard]] QString executable() const { return this->mExecutable; }
 	[[nodiscard]] qint64 pid() const { return this->mPid; }
 	[[nodiscard]] QRect geometry() const { return this->mGeometry; }
+	[[nodiscard]] qint32 desktop() const { return this->mDesktop; }
 	[[nodiscard]] QObject* hyprlandToplevel() const { return this->mHyprland; }
 	[[nodiscard]] QString address() const { return QString::number(this->mHwnd, 16); }
 
@@ -78,6 +81,7 @@ signals:
 	void minimizedChanged();
 	void fullscreenChanged();
 	void geometryChanged();
+	void desktopChanged();
 	void closed();
 
 private:
@@ -91,6 +95,7 @@ private:
 	bool mMinimized = false;
 	bool mFullscreen = false;
 	QRect mGeometry;
+	qint32 mDesktop = 0;
 	QList<QuickshellScreenInfo*> mScreens;
 	QObject* mHyprland = nullptr;
 };

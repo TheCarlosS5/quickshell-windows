@@ -16,6 +16,7 @@
 // clang-format on
 
 #include "../core/qmlglobal.hpp"
+#include "virtualdesktops.hpp"
 
 namespace qs::win32 {
 
@@ -110,6 +111,12 @@ HyprlandToplevelInfo::HyprlandToplevelInfo(WindowHandle* handle): QObject(handle
 bool WindowHandle::refresh(quintptr foreground) {
 	auto* h = toHwnd(this->mHwnd);
 	if (!IsWindow(h) || !WindowTracker::isAppWindow(this->mHwnd)) return false;
+
+	auto desktop = static_cast<qint32>(VirtualDesktops::instance()->desktopOf(this->mHwnd));
+	if (desktop != this->mDesktop) {
+		this->mDesktop = desktop;
+		emit this->desktopChanged();
+	}
 
 	auto title = windowText(h);
 	if (title != this->mTitle) {
@@ -214,6 +221,8 @@ WindowTracker::WindowTracker(QObject* parent): QObject(parent) {
 	SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, nullptr, onWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
 	SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_NAMECHANGE, nullptr, onWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
 	SetWinEventHook(EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED, nullptr, onWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
+	// Desktops created, closed or switched: windows' desktop indexes change.
+	QObject::connect(VirtualDesktops::instance(), &VirtualDesktops::changed, this, &WindowTracker::scheduleRefresh);
 
 	this->refresh();
 }
@@ -238,10 +247,11 @@ bool WindowTracker::isAppWindow(quintptr handle) {
 		if (GetWindow(hwnd, GW_OWNER) != nullptr) return false;
 	}
 
-	// Cloaked: suspended UWP frames, windows on other virtual desktops, hidden shell UI.
+	// Cloaked: suspended UWP frames, hidden shell UI, and windows on other virtual desktops.
+	// Those last ones are still the user's windows (Hyprland lists all workspaces' windows too).
 	DWORD cloaked = 0;
 	DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
-	if (cloaked != 0) return false;
+	if (cloaked != 0 && !VirtualDesktops::instance()->onOtherDesktop(handle)) return false;
 
 	if (GetWindowTextLengthW(hwnd) == 0) return false;
 

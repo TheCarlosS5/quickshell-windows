@@ -4,7 +4,8 @@
 // pieces shells rely on with Windows meaning:
 //  - GlobalShortcut: fired by ii-host's keyboard hook through a WM_COPYDATA sink window
 //  - HyprlandFocusGrab: "click outside closes the popup", via a mouse hook while active
-//  - Hyprland: monitors = screens, one shared workspace, dispatch() for common dispatchers
+//  - Hyprland: monitors = screens, workspaces = Windows' virtual desktops (shared by all
+//    monitors, as Windows does), dispatch() for common dispatchers
 
 #include <qhash.h>
 #include <qlist.h>
@@ -155,9 +156,9 @@ class HyprlandWorkspace: public QObject {
 	Q_OBJECT;
 	// clang-format off
 	Q_PROPERTY(qint32 id READ id CONSTANT);
-	Q_PROPERTY(QString name READ name CONSTANT);
-	Q_PROPERTY(bool active READ active CONSTANT);
-	Q_PROPERTY(bool focused READ focused CONSTANT);
+	Q_PROPERTY(QString name READ name NOTIFY nameChanged);
+	Q_PROPERTY(bool active READ active NOTIFY activeChanged);
+	Q_PROPERTY(bool focused READ focused NOTIFY activeChanged);
 	Q_PROPERTY(bool urgent READ urgent CONSTANT);
 	Q_PROPERTY(qs::win32::compat::HyprlandMonitor* monitor READ monitor NOTIFY monitorChanged);
 	Q_PROPERTY(UntypedObjectModel* toplevels READ toplevels CONSTANT);
@@ -170,18 +171,21 @@ public:
 	HyprlandWorkspace(qint32 id, QObject* parent): QObject(parent), mId(id) {}
 
 	[[nodiscard]] qint32 id() const { return this->mId; }
-	[[nodiscard]] QString name() const { return QString::number(this->mId); }
-	[[nodiscard]] bool active() const { return true; }
-	[[nodiscard]] bool focused() const { return true; }
+	[[nodiscard]] QString name() const;
+	[[nodiscard]] bool active() const;
+	[[nodiscard]] bool focused() const { return this->active(); }
 	[[nodiscard]] bool urgent() const { return false; }
 	[[nodiscard]] HyprlandMonitor* monitor() const;
 	[[nodiscard]] static UntypedObjectModel* toplevels();
 	[[nodiscard]] QVariantMap lastIpcObject() const;
 
-	Q_INVOKABLE void activate() {}
+	// Switches to this desktop.
+	Q_INVOKABLE void activate();
 
 signals:
 	void monitorChanged();
+	void nameChanged();
+	void activeChanged();
 
 private:
 	qint32 mId;
@@ -232,8 +236,13 @@ signals:
 private slots:
 	void syncScreens();
 	void updateFocusedMonitor();
+	void syncWorkspaces();
 
 private:
+	// Hyprland's `workspace` argument: "3", "r+1", "e-1", "+1"... -> desktop index, or -1.
+	[[nodiscard]] static qsizetype workspaceIndex(QString spec);
+	static void focusWorkspace(const QString& spec);
+
 	ObjectModel<HyprlandMonitor> mMonitors {this};
 	ObjectModel<HyprlandWorkspace> mWorkspaces {this};
 	HyprlandWorkspace* workspace = nullptr;

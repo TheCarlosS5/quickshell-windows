@@ -16,6 +16,7 @@
 #include "../../core/qmlglobal.hpp"
 #include "../../window/proxywindow.hpp"
 #include "../native.hpp"
+#include "../virtualdesktops.hpp"
 
 namespace qs::win32::compat {
 
@@ -302,13 +303,22 @@ QVariantMap HyprlandMonitor::lastIpcObject() const {
 	    {"scale", this->scale()},
 	    {"focused", this->mFocused},
 	    {"reserved", reserved},
-	    {"activeWorkspace", QVariantMap {{"id", 1}, {"name", "1"}}},
+	    {"activeWorkspace", QVariantMap {{"id", this->activeWorkspace() ? this->activeWorkspace()->id() : 1}, {"name", this->activeWorkspace() ? this->activeWorkspace()->name() : "1"}}},
 	    {"specialWorkspace", QVariantMap {{"id", 0}, {"name", ""}}},
 	    {"transform", 0},
 	};
 }
 
 // HyprlandWorkspace
+
+QString HyprlandWorkspace::name() const {
+	auto name = VirtualDesktops::instance()->name(this->mId - 1);
+	return name.isEmpty() ? QString::number(this->mId) : name;
+}
+
+bool HyprlandWorkspace::active() const { return VirtualDesktops::instance()->current() == this->mId - 1; }
+
+void HyprlandWorkspace::activate() { VirtualDesktops::instance()->switchTo(this->mId - 1); }
 
 HyprlandMonitor* HyprlandWorkspace::monitor() const { return INSTANCE ? INSTANCE->focusedMonitor() : nullptr; }
 
@@ -327,9 +337,9 @@ QVariantMap HyprlandWorkspace::lastIpcObject() const {
 HyprlandIpcQml::HyprlandIpcQml(QObject* parent): QObject(parent) {
 	INSTANCE = this;
 
-	// Windows has one set of windows across all monitors: a single shared workspace.
-	this->workspace = new HyprlandWorkspace(1, this);
-	this->mWorkspaces.insertObject(this->workspace);
+	// Workspaces are Windows' virtual desktops, shared by all monitors.
+	QObject::connect(VirtualDesktops::instance(), &VirtualDesktops::changed, this, &HyprlandIpcQml::syncWorkspaces);
+	this->syncWorkspaces();
 
 	QObject::connect(qGuiApp, &QGuiApplication::screenAdded, this, &HyprlandIpcQml::syncScreens);
 	QObject::connect(qGuiApp, &QGuiApplication::screenRemoved, this, &HyprlandIpcQml::syncScreens);
@@ -348,6 +358,65 @@ HyprlandIpcQml::HyprlandIpcQml(QObject* parent): QObject(parent) {
 }
 
 HyprlandIpcQml* HyprlandIpcQml::instance() { return INSTANCE; }
+
+void HyprlandIpcQml::syncWorkspaces() {
+	auto* desktops = VirtualDesktops::instance();
+	auto count = desktops->count();
+	auto values = this->mWorkspaces.valueList();
+	for (auto i = values.size(); i > count; --i) {
+		auto* workspace = values.at(i - 1);
+		this->mWorkspaces.removeObject(workspace);
+		workspace->deleteLater();
+	}
+	for (auto i = values.size(); i < count; ++i) {
+		this->mWorkspaces.insertObject(new HyprlandWorkspace(static_cast<qint32>(i + 1), this));
+	}
+
+	values = this->mWorkspaces.valueList();
+	for (auto* workspace: values) {
+		emit workspace->nameChanged();
+		emit workspace->activeChanged();
+	}
+	auto* focused = values.value(desktops->current(), values.value(0));
+	if (focused != this->workspace) {
+		this->workspace = focused;
+		emit this->focusedWorkspaceChanged();
+		for (auto* monitor: this->byScreen) emit monitor->activeWorkspaceChanged();
+	}
+}
+
+qsizetype HyprlandIpcQml::workspaceIndex(QString spec) {
+	spec = spec.trimmed();
+	spec.remove('"');
+	auto* desktops = VirtualDesktops::instance();
+	bool ok = false;
+	auto number = spec.toInt(&ok);
+	if (ok && !spec.startsWith('+') && !spec.startsWith('-')) return number >= 1 ? number - 1 : -1;
+
+	// Relative: r+1 / r-1 (any), e+1 / e-1 and m+1 (existing ones, wrapping), +1 / -1.
+	auto wraps = spec.startsWith('e') || spec.startsWith('m');
+	if (spec.startsWith('r') || wraps) spec = spec.mid(1);
+	auto delta = spec.toInt(&ok);
+	if (!ok) return -1;
+	auto target = desktops->current() + delta;
+	if (wraps) target = ((target % desktops->count()) + desktops->count()) % desktops->count();
+	return std::max<qsizetype>(0, target);
+}
+
+void HyprlandIpcQml::focusWorkspace(const QString& spec) {
+	auto index = HyprlandIpcQml::workspaceIndex(spec);
+	if (index < 0) {
+		qCInfo(logHyprCompat) << "Ignoring workspace" << spec;
+		return;
+	}
+	// As in Hyprland, going to a workspace that does not exist yet creates it.
+	auto* desktops = VirtualDesktops::instance();
+	if (index >= desktops->count()) {
+		for (auto i = desktops->count(); i <= index; ++i) desktops->create();
+		return; // Win+Ctrl+D also switches to the new desktop
+	}
+	desktops->switchTo(index);
+}
 
 void HyprlandIpcQml::syncScreens() {
 	auto screens = QGuiApplication::screens();
@@ -418,7 +487,11 @@ void HyprlandIpcQml::dispatch(const QString& request) {
 		auto match = addressRe.match(body);
 		auto address = match.hasMatch() ? static_cast<quintptr>(match.captured(2).toULongLong(nullptr, 16)) : 0;
 
-		if (name == "focus" && address) {
+		static const QRegularExpression workspaceRe(R"(workspace\s*=\s*("[^"]*"|[^,}\s]+))");
+		auto workspaceMatch = workspaceRe.match(body);
+		if (name == "focus" && workspaceMatch.hasMatch()) {
+			HyprlandIpcQml::focusWorkspace(workspaceMatch.captured(1));
+		} else if (name == "focus" && address) {
 			WindowTracker::forceForeground(address);
 		} else if (name == "window.close" && address) {
 			PostMessageW(reinterpret_cast<HWND>(address), WM_CLOSE, 0, 0); // NOLINT
@@ -454,6 +527,8 @@ void HyprlandIpcQml::dispatch(const QString& request) {
 		if (auto hwnd = addressArg()) WindowTracker::forceForeground(hwnd);
 	} else if (dispatcher == "closewindow") {
 		if (auto hwnd = addressArg()) PostMessageW(reinterpret_cast<HWND>(hwnd), WM_CLOSE, 0, 0); // NOLINT
+	} else if (dispatcher == "workspace") {
+		HyprlandIpcQml::focusWorkspace(args);
 	} else if (dispatcher == "killactive") {
 		if (auto* fg = GetForegroundWindow()) PostMessageW(fg, WM_CLOSE, 0, 0);
 	} else {
