@@ -4,6 +4,7 @@
 #include <thread>
 
 #include <qbuffer.h>
+#include <qbytearray.h>
 #include <qcryptographichash.h>
 #include <qdir.h>
 #include <qfile.h>
@@ -355,6 +356,8 @@ private:
 		auto* explorer = this->explorerTray;
 		if (!explorer || !IsWindow(explorer)) explorer = this->findExplorerTray();
 		if (!explorer) return 0;
+		// Never wait long: some senders are Explorer's own threads, and a long wait here can
+		// chain Explorer to itself through us (tried 15 s once: Explorer hung within minutes).
 		DWORD_PTR result = 0;
 		SendMessageTimeoutW(explorer, WM_COPYDATA, wParam, lParam, SMTO_ABORTIFHUNG, 2000, &result);
 		return static_cast<LRESULT>(result);
@@ -417,15 +420,22 @@ private:
 		auto* host = current();
 		if (host && msg == WM_COPYDATA) {
 			auto* copy = reinterpret_cast<const COPYDATASTRUCT*>(lParam); // NOLINT
-			// Explorer gets everything first-hand too: app bars, icon rects, and the icons.
-			auto result = host->forward(wParam, lParam);
 			if (copy && copy->lpData && copy->dwData == COPYDATA_TRAY
 			    && copy->cbData >= offsetof(TrayMessage, nid) + offsetof(NotifyIconData32, szTip))
 			{
-				host->onTrayMessage(copy);
+				// Icon updates: release the sender at once, then pass our own copy on to Explorer.
+				// Keeping it blocked until Explorer answers ties its threads to Explorer's through
+				// ours, which is how a busy Explorer becomes a hung one.
+				QByteArray data(static_cast<const char*>(copy->lpData), static_cast<qsizetype>(copy->cbData));
+				COPYDATASTRUCT own = *copy;
+				own.lpData = data.data();
+				ReplyMessage(TRUE);
+				host->forward(wParam, reinterpret_cast<LPARAM>(&own));
+				host->onTrayMessage(&own);
 				return TRUE;
 			}
-			return result;
+			// Everything else needs Explorer's real answer (app bars, icon rects): pass it through.
+			return host->forward(wParam, lParam);
 		}
 		return DefWindowProcW(hwnd, msg, wParam, lParam);
 	}

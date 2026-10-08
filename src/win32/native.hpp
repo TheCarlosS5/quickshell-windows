@@ -115,9 +115,11 @@ signals:
 	void fullscreenAppChanged(bool active);
 
 private:
-	void registerBar();
+	bool registerBar();
 	void unregisterBar();
 	void apply();
+	void verify();
+	[[nodiscard]] bool reservationHolds() const;
 
 	QPointer<QWindow> window;
 	quintptr mHwnd = 0;
@@ -125,6 +127,11 @@ private:
 	Qt::Edge edge = static_cast<Qt::Edge>(0);
 	qint32 thickness = 0;
 	QRect mReserved;
+	// Explorer drops appbars when it restarts and can be too busy to answer ABM_NEW:
+	// keep checking that the space is really reserved while it should be.
+	QTimer watchdog;
+	int misses = 0;
+	bool warned = false;
 };
 
 // Windows session lock/unlock notifications (WTSRegisterSessionNotification).

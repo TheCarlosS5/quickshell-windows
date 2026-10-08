@@ -1,5 +1,6 @@
 #include "native.hpp"
 #include <cmath>
+#include <cstddef>
 
 #include <qcoreapplication.h>
 #include <qlogging.h>
@@ -10,6 +11,7 @@
 #include <windows.h>
 // clang-format off
 #include <shellapi.h>
+#include <shlwapi.h>
 #include <wtsapi32.h>
 // clang-format on
 
@@ -18,6 +20,7 @@
 namespace qs::win32 {
 
 QS_LOGGING_CATEGORY(logWin32, "quickshell.win32", QtWarningMsg);
+QS_LOGGING_CATEGORY(logAppBar, "quickshell.win32.appbar", QtInfoMsg);
 
 namespace {
 
@@ -335,7 +338,98 @@ void InputRegions::setPassthrough(QWindow* window, bool passthrough) {
 
 // AppBar
 
-AppBar::AppBar(QWindow* window): window(window) {}
+namespace {
+
+// What shell32's SHAppBarMessage sends to the taskbar window (WM_COPYDATA, dwData 0), as seen
+// on Windows 11 24H2/25H2 (tools/sandbox/tests/appbar-capture2.ps1). Position queries carry
+// their APPBARDATA in a shared memory block owned by the taskbar's process.
+struct AppBarData3264 {
+	DWORD cbSize;
+	DWORD hWnd;
+	UINT uCallbackMessage;
+	UINT uEdge;
+	RECT rc;
+	LONGLONG lParam;
+};
+
+struct AppBarCommand {
+	AppBarData3264 abd;
+	DWORD dwMessage;
+	DWORD padding1;
+	ULONGLONG hShared;     // valid in dwSharedOwner
+	DWORD dwSharedOwner;   // the taskbar's process
+	DWORD padding2;
+};
+
+static_assert(sizeof(AppBarData3264) == 40);
+static_assert(sizeof(AppBarCommand) == 64);
+static_assert(offsetof(AppBarCommand, hShared) == 48);
+static_assert(offsetof(AppBarCommand, dwSharedOwner) == 56);
+
+// SHAppBarMessage, addressed to Explorer's taskbar. SHAppBarMessage itself goes to whichever
+// Shell_TrayWnd FindWindow returns, which is the shell's own tray while it runs; from inside
+// this process shell32 then hands over an in-process pointer that Explorer cannot read, and
+// ABM_QUERYPOS/ABM_SETPOS silently do nothing. Sent the way it arrives from any other app.
+UINT_PTR explorerAppBarMessage(DWORD message, APPBARDATA* data) {
+	HWND tray = nullptr;
+	DWORD explorer = 0;
+	while ((tray = FindWindowExW(nullptr, tray, L"Shell_TrayWnd", nullptr))) {
+		GetWindowThreadProcessId(tray, &explorer);
+		if (explorer != GetCurrentProcessId()) break;
+	}
+	if (!tray) return SHAppBarMessage(message, data);
+
+	AppBarCommand command {};
+	command.abd.cbSize = sizeof(AppBarData3264);
+	command.abd.hWnd = static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(data->hWnd)); // NOLINT
+	command.abd.uCallbackMessage = data->uCallbackMessage;
+	command.abd.uEdge = data->uEdge;
+	command.abd.rc = data->rc;
+	command.abd.lParam = data->lParam;
+	command.dwMessage = message;
+
+	HANDLE shared = nullptr;
+	if (message == ABM_QUERYPOS || message == ABM_SETPOS || message == ABM_GETTASKBARPOS) {
+		shared = SHAllocShared(&command.abd, sizeof(command.abd), explorer);
+		if (!shared) return SHAppBarMessage(message, data);
+		command.hShared = reinterpret_cast<ULONG_PTR>(shared); // NOLINT
+		command.dwSharedOwner = explorer;
+	}
+
+	COPYDATASTRUCT copy {};
+	copy.dwData = 0;
+	copy.cbData = sizeof(command);
+	copy.lpData = &command;
+	DWORD_PTR result = 0;
+	auto sent = SendMessageTimeoutW(
+	    tray,
+	    WM_COPYDATA,
+	    reinterpret_cast<WPARAM>(data->hWnd),
+	    reinterpret_cast<LPARAM>(&copy),
+	    SMTO_ABORTIFHUNG,
+	    5000,
+	    &result
+	);
+
+	if (shared) {
+		if (sent) {
+			if (auto* out = static_cast<AppBarData3264*>(SHLockShared(shared, explorer))) {
+				data->rc = out->rc;
+				SHUnlockShared(out);
+			}
+		}
+		SHFreeShared(shared, explorer);
+	}
+
+	return sent ? result : 0;
+}
+
+} // namespace
+
+AppBar::AppBar(QWindow* window): window(window) {
+	this->watchdog.setInterval(3000);
+	QObject::connect(&this->watchdog, &QTimer::timeout, this, &AppBar::verify);
+}
 
 AppBar::~AppBar() { this->unregisterBar(); }
 
@@ -344,34 +438,80 @@ void AppBar::update(Qt::Edge edge, qint32 thickness) {
 	this->thickness = thickness;
 
 	if (edge == 0 || thickness <= 0) {
+		this->watchdog.stop();
 		this->unregisterBar();
 		return;
 	}
 
-	this->registerBar();
-	this->apply();
+	if (this->registerBar()) this->apply();
+	this->misses = 0;
+	this->watchdog.start();
 }
 
-void AppBar::registerBar() {
+bool AppBar::registerBar() {
 	auto h = hwnd(this->window);
-	if (this->registered && h == this->mHwnd) return;
+	if (this->registered && h == this->mHwnd) return true;
 	if (this->registered) this->unregisterBar();
-	if (!h) return;
+	if (!h) return false;
 
 	APPBARDATA abd {};
 	abd.cbSize = sizeof(abd);
 	abd.hWnd = toHwnd(h);
 	abd.uCallbackMessage = NativeEventRouter::appBarMessage();
 
-	if (!SHAppBarMessage(ABM_NEW, &abd)) {
-		qCWarning(logWin32) << "ABM_NEW failed for" << this->window;
-		return;
+	if (!explorerAppBarMessage(ABM_NEW, &abd)) {
+		// Explorer busy, or it still has this window from before: clear it, the watchdog retries.
+		explorerAppBarMessage(ABM_REMOVE, &abd);
+		if (!this->warned) qCWarning(logAppBar) << "ABM_NEW failed for" << this->window << "- will retry";
+		this->warned = true;
+		return false;
 	}
 
 	this->mHwnd = h;
 	this->registered = true;
+	this->warned = false;
 	NativeEventRouter::instance()->addAppBar(h, this);
-	qCInfo(logWin32) << "Registered appbar" << Qt::hex << h;
+	qCInfo(logAppBar) << "Registered appbar" << Qt::hex << h;
+	return true;
+}
+
+bool AppBar::reservationHolds() const {
+	auto* monitor = MonitorFromWindow(toHwnd(this->mHwnd), MONITOR_DEFAULTTONEAREST);
+	MONITORINFO info {};
+	info.cbSize = sizeof(info);
+	if (!GetMonitorInfoW(monitor, &info)) return true;
+
+	auto px = static_cast<LONG>(std::lround(this->thickness * this->window->devicePixelRatio()));
+	const auto& work = info.rcWork;
+	const auto& screen = info.rcMonitor;
+	switch (this->edge) {
+	case Qt::TopEdge: return work.top >= screen.top + px;
+	case Qt::BottomEdge: return work.bottom <= screen.bottom - px;
+	case Qt::LeftEdge: return work.left >= screen.left + px;
+	case Qt::RightEdge: return work.right <= screen.right - px;
+	default: return true;
+	}
+}
+
+void AppBar::verify() {
+	if (this->window == nullptr || this->edge == 0 || this->thickness <= 0) return;
+
+	if (!this->registered) {
+		if (this->registerBar()) this->apply();
+		return;
+	}
+
+	// Explorer updates the work area asynchronously: only act on two misses in a row.
+	if (this->reservationHolds()) {
+		this->misses = 0;
+		return;
+	}
+	if (++this->misses < 2) return;
+
+	qCInfo(logAppBar) << "Appbar" << Qt::hex << this->mHwnd << "lost its reserved space, registering again";
+	this->misses = 0;
+	this->unregisterBar();
+	if (this->registerBar()) this->apply();
 }
 
 void AppBar::unregisterBar() {
@@ -380,10 +520,10 @@ void AppBar::unregisterBar() {
 	APPBARDATA abd {};
 	abd.cbSize = sizeof(abd);
 	abd.hWnd = toHwnd(this->mHwnd);
-	SHAppBarMessage(ABM_REMOVE, &abd);
+	explorerAppBarMessage(ABM_REMOVE, &abd);
 
 	NativeEventRouter::instance()->removeAppBar(this->mHwnd);
-	qCInfo(logWin32) << "Removed appbar" << Qt::hex << this->mHwnd;
+	qCInfo(logAppBar) << "Removed appbar" << Qt::hex << this->mHwnd;
 	this->registered = false;
 	this->mHwnd = 0;
 	this->mReserved = QRect();
@@ -412,7 +552,7 @@ void AppBar::apply() {
 	default: return;
 	}
 
-	SHAppBarMessage(ABM_QUERYPOS, &abd);
+	explorerAppBarMessage(ABM_QUERYPOS, &abd);
 
 	// QUERYPOS may move the near edge away from other appbars; keep our thickness from there.
 	switch (this->edge) {
@@ -423,9 +563,9 @@ void AppBar::apply() {
 	default: break;
 	}
 
-	SHAppBarMessage(ABM_SETPOS, &abd);
+	explorerAppBarMessage(ABM_SETPOS, &abd);
 	this->mReserved = toQRect(abd.rc);
-	qCInfo(logWin32) << "Appbar" << Qt::hex << this->mHwnd << Qt::dec << "reserves" << this->mReserved;
+	qCInfo(logAppBar) << "Appbar" << Qt::hex << this->mHwnd << Qt::dec << "reserves" << this->mReserved;
 }
 
 void AppBar::handleCallback(quintptr wParam, qintptr lParam) {
