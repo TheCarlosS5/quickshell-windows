@@ -119,6 +119,7 @@ void LayerManager::setLayer(QWindow* window, Layer layer) {
 
 void LayerManager::remove(QWindow* window) {
 	this->layers.remove(window);
+	this->yielding.remove(window);
 	QObject::disconnect(window, nullptr, this, nullptr);
 }
 
@@ -182,7 +183,7 @@ void LayerManager::restack() {
 			if (!h) continue;
 
 			auto monitor = reinterpret_cast<quintptr>(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST));
-			auto demoted = pass == Layer::Top && this->fullscreenMonitors.contains(monitor);
+			auto demoted = this->yields(window, pass) && this->fullscreenMonitors.contains(monitor);
 
 			SetWindowPos(
 			    h,
@@ -195,6 +196,13 @@ void LayerManager::restack() {
 			);
 		}
 	}
+}
+
+void LayerManager::setYieldsToFullscreen(QWindow* window, bool yields) {
+	if (yields == this->yielding.contains(window)) return;
+	if (yields) this->yielding.insert(window);
+	else this->yielding.remove(window);
+	this->restack();
 }
 
 void LayerManager::setFullscreenAppActive(quintptr monitor, bool active) {
@@ -213,7 +221,7 @@ void LayerManager::setFullscreenAppActive(quintptr monitor, bool active) {
 
 		// Leaving the topmost band needs an explicit HWND_NOTOPMOST first.
 		for (auto [window, layer]: this->layers.asKeyValueRange()) {
-			if (layer != Layer::Top) continue;
+			if (!this->yields(window, layer)) continue;
 			auto h = toHwnd(hwnd(window));
 			if (!h) continue;
 			if (reinterpret_cast<quintptr>(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST)) != monitor) {

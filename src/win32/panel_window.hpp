@@ -74,6 +74,7 @@ public:
 	// Explicit layer from the layer-shell compatibility API; overrides aboveWindows.
 	[[nodiscard]] Layer layer() const;
 	void setLayer(Layer layer);
+	void setYieldsToFullscreen(bool yields);
 
 	// Layer-shell keyboard focus: 0 none, 1 exclusive (grab while visible), 2 on demand.
 	void setKeyboardFocus(quint8 mode);
@@ -106,6 +107,7 @@ private:
 	EngineGeneration* knownGeneration = nullptr;
 	std::unique_ptr<AppBar> appBar;
 	std::optional<Layer> mLayer;
+	bool mYieldsToFullscreen = false;
 	quint8 mKeyboardFocus = 0;
 
 	// clang-format off

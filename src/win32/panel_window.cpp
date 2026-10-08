@@ -165,9 +165,16 @@ void WinPanelWindow::setLayer(Layer layer) {
 	emit this->layerChanged();
 }
 
+void WinPanelWindow::setYieldsToFullscreen(bool yields) {
+	if (yields == this->mYieldsToFullscreen) return;
+	this->mYieldsToFullscreen = yields;
+	this->updateLayer();
+}
+
 void WinPanelWindow::updateLayer() {
 	if (this->window == nullptr) return;
 	LayerManager::instance()->setLayer(this->window, this->layer());
+	LayerManager::instance()->setYieldsToFullscreen(this->window, this->mYieldsToFullscreen);
 }
 
 void WinPanelWindow::setKeyboardFocus(quint8 mode) {

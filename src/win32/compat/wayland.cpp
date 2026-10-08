@@ -42,6 +42,13 @@ void WlrLayershell::setLayer(WlrLayer::Enum layer) {
 void WlrLayershell::setNamespace(QString ns) {
 	if (ns == this->mNamespace) return;
 	this->mNamespace = std::move(ns);
+
+	// Like Windows' own notifications, these keep out of the way of games and videos.
+	static const QStringList yielding = {"quickshell:notificationPopup", "quickshell:screenCorners"};
+	if (auto* panel = WinPanelWindow::forObject(this->target)) {
+		panel->setYieldsToFullscreen(yielding.contains(this->mNamespace));
+	}
+
 	emit this->namespaceChanged();
 }
 

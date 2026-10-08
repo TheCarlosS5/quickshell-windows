@@ -2,6 +2,7 @@
 
 #include <qabstractnativeeventfilter.h>
 #include <qhash.h>
+#include <qset.h>
 #include <qlist.h>
 #include <qnamespace.h>
 #include <qobject.h>
@@ -44,6 +45,9 @@ public:
 	void remove(QWindow* window);
 	// Temporarily drops Top-layer windows on a monitor below everything (fullscreen apps).
 	void setFullscreenAppActive(quintptr monitor, bool active);
+	// Overlay-layer windows that step aside for fullscreen apps too (notification popups,
+	// screen corners), unlike ones the user opens on purpose (overlay, session menu).
+	void setYieldsToFullscreen(QWindow* window, bool yields);
 	void restack();
 	// Puts desktop-layer windows back right above Progman (z-order drifts as apps activate).
 	void restackDesktop();
@@ -51,8 +55,12 @@ public:
 private:
 	explicit LayerManager(QObject* parent = nullptr);
 	void apply(QWindow* window, Layer layer);
+	[[nodiscard]] bool yields(QWindow* window, Layer layer) const {
+		return layer == Layer::Top || this->yielding.contains(window);
+	}
 
 	QHash<QWindow*, Layer> layers;
+	QSet<QWindow*> yielding;
 	QList<quintptr> fullscreenMonitors;
 };
 
