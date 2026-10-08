@@ -129,7 +129,7 @@ void VirtualDesktops::reload() {
 	DWORD session = 0;
 	if (currentId.size() != 16 && ProcessIdToSessionId(GetCurrentProcessId(), &session)) {
 		// Some builds keep the current desktop per logon session.
-		auto path = QString::fromWCharArray(PARENT_PATH) + QString("\SessionInfo\%1\VirtualDesktops").arg(session);
+		auto path = QString::fromWCharArray(PARENT_PATH) + QString("\\SessionInfo\\%1\\VirtualDesktops").arg(session);
 		currentId = readBinary(HKEY_CURRENT_USER, reinterpret_cast<LPCWSTR>(path.utf16()), L"CurrentVirtualDesktop"); // NOLINT
 	}
 	if (currentId.size() == 16) current = std::max<qsizetype>(0, ids.indexOf(uuidFromBytes(currentId.constData())));

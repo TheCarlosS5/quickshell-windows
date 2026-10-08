@@ -75,6 +75,7 @@ struct TrayMessage {
 
 constexpr ULONG_PTR COPYDATA_TRAY = 1;
 constexpr UINT_PTR TIMER_CHECK = 1;
+constexpr UINT_PTR TIMER_RAISE = 2;
 
 QString fromFixed(const WCHAR* text, size_t capacity) {
 	size_t length = 0;
@@ -261,6 +262,7 @@ public:
 		}
 
 		item->apply(update);
+		if (isShellSystemIcon(item)) return; // never listed
 		item->setPromoted(this->promotions->isPromoted(item->exe(), item->iconUid(), item->guid()));
 		auto shown = this->items.valueList().contains(item);
 		if (item->isHidden() && shown) this->items.removeObject(item);
@@ -269,6 +271,14 @@ public:
 
 private:
 	Backend();
+
+	// Explorer's own icons (network, volume, power, microphone/location in use...): the shell
+	// has its own indicators for those. "Safely remove hardware" is kept.
+	static bool isShellSystemIcon(const SystemTrayItem* item) {
+		if (!item->exe().endsWith("\\explorer.exe", Qt::CaseInsensitive)) return false;
+		static const QString hotplug = "{7820ae78-23e3-4229-82c1-e41cb67d5b9c}";
+		return item->guid().isEmpty() || item->guid().compare(hotplug, Qt::CaseInsensitive) != 0;
+	}
 
 	QHash<QString, SystemTrayItem*> all;
 	Promotions* promotions = nullptr;
@@ -327,6 +337,8 @@ private:
 
 		this->check();
 		SetTimer(this->watcher, TIMER_CHECK, 1000, nullptr);
+		// Explorer re-raises its taskbar on foreground changes: check right after each one.
+		SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, TrayHost::onForeground, 0, 0, WINEVENT_OUTOFCONTEXT);
 
 		MSG msg;
 		while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
@@ -367,8 +379,13 @@ private:
 	}
 
 	// Be the Shell_TrayWnd that FindWindow returns, then ask every app to (re)announce its icons.
-	void claim() {
+	void raise() const {
 		SetWindowPos(this->tray, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+	}
+
+	// Takes the tray and asks every app to add its icons again (only when ours is new).
+	void claim() {
+		this->raise();
 		this->lastClaim = GetTickCount64();
 		this->ignoreAnnounceUntil = this->lastClaim + 3000;
 		SendNotifyMessageW(HWND_BROADCAST, this->taskbarCreated, 0, 0);
@@ -442,10 +459,11 @@ private:
 			this->stepAside("Explorer is not running");
 		} else if (!this->tray) {
 			if (GetTickCount64() - this->explorerSince >= SETTLE_MS) this->createTray();
-		} else if (FindWindowW(L"Shell_TrayWnd", nullptr) != this->tray && GetTickCount64() - this->lastClaim > 10000) {
-			// Explorer's taskbar can end up above ours (it re-raises itself): take the place back.
-			qCInfo(logTray) << "Reclaiming the tray";
-			this->claim();
+		} else if (FindWindowW(L"Shell_TrayWnd", nullptr) != this->tray) {
+			// Explorer re-raises its taskbar whenever the foreground app changes: take the place
+			// back at once, quietly. Announcing a new taskbar again would make every app re-add
+			// its icons each time (seen every ~10 s on a real desktop: icons blinking, vanishing).
+			this->raise();
 		}
 
 		// Apps that exit without removing their icon.
@@ -552,6 +570,12 @@ private:
 		return DefWindowProcW(hwnd, msg, wParam, lParam);
 	}
 
+	static void CALLBACK onForeground(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
+		auto* host = current();
+		// Explorer reorders right after the switch; look a moment later.
+		if (host && host->watcher) SetTimer(host->watcher, TIMER_RAISE, 50, nullptr);
+	}
+
 	static LRESULT CALLBACK watcherProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 		auto* host = current();
 		if (!host) return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -571,6 +595,11 @@ private:
 		}
 		if (msg == WM_TIMER && wParam == TIMER_CHECK) {
 			host->check();
+			return 0;
+		}
+		if (msg == WM_TIMER && wParam == TIMER_RAISE) {
+			KillTimer(hwnd, TIMER_RAISE);
+			if (host->tray && FindWindowW(L"Shell_TrayWnd", nullptr) != host->tray) host->raise();
 			return 0;
 		}
 		return DefWindowProcW(hwnd, msg, wParam, lParam);
