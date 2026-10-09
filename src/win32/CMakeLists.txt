@@ -82,7 +82,7 @@ target_link_libraries(quickshell-win32-notifications PRIVATE Qt::Quick windowsap
 target_link_libraries(quickshell PRIVATE quickshell-win32-notificationsplugin)
 
 # Windows-only services ii's overlay uses where Linux has command-line tools (nmcli, ...).
-qt_add_library(quickshell-win32-windows STATIC services/network.cpp services/uisound.cpp)
+qt_add_library(quickshell-win32-windows STATIC services/network.cpp services/uisound.cpp services/keyboardlayout.cpp)
 qt_add_qml_module(quickshell-win32-windows
 	URI Quickshell.Windows
 	VERSION 0.1
