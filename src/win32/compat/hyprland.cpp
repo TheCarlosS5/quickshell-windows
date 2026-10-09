@@ -46,7 +46,14 @@ LRESULT CALLBACK sinkWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 			// Deliver after returning so ii-host is never blocked on QML.
 			QMetaObject::invokeMethod(
 			    QCoreApplication::instance(),
-			    [name, pressed]() { GlobalShortcut::dispatch(name, pressed); },
+			    [name, pressed]() {
+				    // "hl:<dispatcher> <args>": a Hyprland dispatcher (ii-host's Win+number).
+				    if (name.startsWith("hl:")) {
+					    if (pressed) HyprlandIpcQml::instance()->dispatch(name.mid(3));
+					    return;
+				    }
+				    GlobalShortcut::dispatch(name, pressed);
+			    },
 			    Qt::QueuedConnection
 			);
 			return TRUE;
@@ -67,6 +74,17 @@ void ensureSink() {
 	// Top-level (hidden) rather than message-only so FindWindow from ii-host finds it.
 	sink = CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"ii shell shortcuts", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, wc.hInstance, nullptr);
 	ChangeWindowMessageFilterEx(sink, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
+	// Alt+F4 on the desktop: the session menu, as Windows shows "Shut Down Windows" there.
+	NativeEventRouter::setDesktopCloseHandler([]() {
+		QMetaObject::invokeMethod(
+		    QCoreApplication::instance(),
+		    []() {
+			    GlobalShortcut::dispatch("sessionToggle", true);
+			    GlobalShortcut::dispatch("sessionToggle", false);
+		    },
+		    Qt::QueuedConnection
+		);
+	});
 	qCInfo(logHyprCompat) << "Shortcut sink ready";
 }
 
@@ -409,9 +427,20 @@ void HyprlandIpcQml::focusWorkspace(const QString& spec) {
 		qCInfo(logHyprCompat) << "Ignoring workspace" << spec;
 		return;
 	}
-	// As in Hyprland, going to a workspace that does not exist yet creates it (one new desktop,
-	// at the end: Windows has no gaps). Win+Ctrl+D also switches to it.
 	auto* desktops = VirtualDesktops::instance();
+	// Relative moves (the bar's mouse wheel, r+1 / -1) only go through desktops that exist:
+	// scrolling past the last one used to create a new desktop on every notch.
+	auto trimmed = spec.trimmed();
+	trimmed.remove('"');
+	bool absolute = false;
+	trimmed.toInt(&absolute);
+	absolute = absolute && !trimmed.startsWith('+') && !trimmed.startsWith('-');
+	if (!absolute && index >= desktops->count()) {
+		qCInfo(logHyprCompat) << "Already on the last desktop:" << spec;
+		return;
+	}
+	// A desktop number that does not exist yet creates ONE new desktop at the end (Windows has
+	// no gaps), never several. Win+Ctrl+D also switches to it.
 	if (index >= desktops->count()) {
 		desktops->create();
 		return;

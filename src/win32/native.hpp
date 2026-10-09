@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include <qabstractnativeeventfilter.h>
 #include <qhash.h>
 #include <qset.h>
@@ -168,9 +170,14 @@ public:
 
 	bool nativeEventFilter(const QByteArray& eventType, void* message, qintptr* result) override;
 
+	// Called when the user closes a desktop-layer surface (Alt+F4 on the desktop). Shell
+	// surfaces never close that way; the shell can answer like Windows does on its desktop.
+	static void setDesktopCloseHandler(std::function<void()> handler);
+
 private:
 	NativeEventRouter() = default;
 	QHash<quintptr, AppBar*> appBars;
+	std::function<void()> desktopCloseHandler;
 };
 
 } // namespace qs::win32

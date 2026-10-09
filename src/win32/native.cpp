@@ -45,6 +45,8 @@ void applyShellWindowStyle(QWindow* window, bool focusable) {
 	// Focusable panels (the desktop) take the keyboard when clicked, never just by appearing:
 	// keyboard grabs activate explicitly (WinPanelWindow::updateKeyboardGrab).
 	window->setProperty("_q_showWithoutActivating", true);
+	// Alt+F4 and other close requests are ignored on these (see NativeEventRouter).
+	window->setProperty("_qs_shellSurface", true);
 
 	auto h = toHwnd(hwnd(window));
 	if (!h) return;
@@ -677,6 +679,10 @@ quint32 NativeEventRouter::appBarMessage() {
 	return message;
 }
 
+void NativeEventRouter::setDesktopCloseHandler(std::function<void()> handler) {
+	instance()->desktopCloseHandler = std::move(handler);
+}
+
 void NativeEventRouter::addAppBar(quintptr hwnd, AppBar* bar) { this->appBars.insert(hwnd, bar); }
 void NativeEventRouter::removeAppBar(quintptr hwnd) { this->appBars.remove(hwnd); }
 
@@ -689,6 +695,14 @@ bool hasCustomTitleBar(HWND hwnd) {
 		// handle() first: winId() would create a window that is still being created.
 		if (window->handle() == nullptr) continue;
 		if (reinterpret_cast<HWND>(window->winId()) == hwnd) return window->property("customTitleBar").toBool(); // NOLINT
+	}
+	return false;
+}
+
+bool isShellSurface(HWND hwnd) {
+	for (auto* window: QGuiApplication::topLevelWindows()) {
+		if (window->handle() == nullptr) continue;
+		if (reinterpret_cast<HWND>(window->winId()) == hwnd) return window->property("_qs_shellSurface").toBool(); // NOLINT
 	}
 	return false;
 }
@@ -742,6 +756,20 @@ bool NativeEventRouter::nativeEventFilter(
 	auto* msg = static_cast<MSG*>(message);
 
 	if (customTitleBarMessage(msg, result)) return true;
+
+	// Shell surfaces (wallpaper, bar, dock, panels) are not windows the user closes: Alt+F4
+	// on the focused desktop used to close the wallpaper. Alt+F4 there opens the shell's own
+	// answer instead (ii: the session menu), as Windows shows "Shut Down Windows".
+	auto isSysClose = msg->message == WM_SYSCOMMAND && (msg->wParam & 0xFFF0) == SC_CLOSE;
+	if ((isSysClose || msg->message == WM_CLOSE) && isShellSurface(msg->hwnd)) {
+		auto desktop = LayerManager::instance()->isDesktopLayer(reinterpret_cast<quintptr>(msg->hwnd)); // NOLINT
+		qCInfo(logWin32) << "Ignored" << (isSysClose ? "SC_CLOSE" : "WM_CLOSE") << "on a shell surface"
+		                 << (desktop ? "(desktop)" : "") << "result ptr:" << (result != nullptr);
+		if (isSysClose && desktop && this->desktopCloseHandler) this->desktopCloseHandler();
+		// Qt also filters messages it pulls from the queue itself, without a result to fill.
+		if (result) *result = 0;
+		return true;
+	}
 
 	// Activating a window (a click on the desktop gives it the keyboard) raises it to the top
 	// of the normal band, over every app. Desktop-layer windows keep their place instead;
