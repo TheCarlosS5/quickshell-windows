@@ -7,8 +7,15 @@ battery, Bluetooth, virtual desktops, keyboard layouts and interface sounds). It
 [ii-windows](https://github.com/TheCarlosS5/ii-windows), the port of end-4's Illogical Impulse
 shell to Windows 11. Branch `main` here is the `windows` branch of the port.
 
-Quickshell is by outfoxxed and contributors, LGPL-3.0; this fork keeps that license. Upstream
-Quickshell does not support Windows; please don't report issues of this fork upstream.
+Quickshell is by outfoxxed and contributors, LGPL-3.0; this fork keeps that license.
+
+**This is an unofficial fork.** It is not affiliated with or endorsed by the Quickshell project,
+and upstream Quickshell does not support Windows. The Windows backend was written with AI
+assistance (Claude Code and Codex); its author is responsible for it, and it is not submitted
+upstream. Please report problems with this fork
+[in ii-windows](https://github.com/TheCarlosS5/ii-windows/issues), never to upstream Quickshell.
+The contribution policy below ([CONTRIBUTING.md](CONTRIBUTING.md)) is upstream's and applies to
+upstream Quickshell.
 
 ---
 
