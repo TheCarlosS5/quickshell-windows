@@ -6,6 +6,7 @@
 #include <qhash.h>
 #include <qjsengine.h>
 #include <qloggingcategory.h>
+#include <qset.h>
 #include <qvector.h>
 
 #include "logcat.hpp"
@@ -21,7 +22,9 @@ public:
 	void scanDir(const QDir& dir);
 	void scanQmlRoot(const QString& path);
 
-	QVector<QDir> scannedDirs;
+	// Absolute paths: QDir::operator== resolves canonical paths on the filesystem each time, which
+	// on Windows (with antivirus hooks) made scanning ii take ~20 s.
+	QSet<QString> scannedDirs;
 	QVector<QString> scannedFiles;
 	QHash<QString, QByteArray> fileHashes;
 	QHash<QString, QString> fileIntercepts;

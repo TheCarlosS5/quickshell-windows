@@ -304,6 +304,7 @@ int launch(const LaunchArgs& args, char** argv) {
 	QuickshellTracked::init();
 
 	QsEnginePlugin::initPlugins();
+	qInfo() << "Startup: plugins ready";
 
 	// Base window transparency appears to be additive.
 	// Use a fully transparent window with a colored rect.
@@ -315,6 +316,7 @@ int launch(const LaunchArgs& args, char** argv) {
 
 	qs::ipc::IpcServer::start();
 	QsPaths::instance()->createLock();
+	qInfo() << "Startup: ipc and instance lock ready";
 
 	auto root = RootWrapper(args.configPath, shellId);
 	QGuiApplication::setQuitOnLastWindowClosed(false);

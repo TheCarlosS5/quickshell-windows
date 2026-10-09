@@ -4,6 +4,7 @@
 
 #include <qcontainerfwd.h>
 #include <qcryptographichash.h>
+#include <qelapsedtimer.h>
 #include <qdir.h>
 #include <qfileinfo.h>
 #include <qjsengine.h>
@@ -22,11 +23,18 @@
 
 QS_LOGGING_CATEGORY(logQmlScanner, "quickshell.qmlscanner", QtWarningMsg);
 
+namespace {
+qint64 readNs = 0, parseNs = 0, listNs = 0, statNs = 0; // NOLINT
+}
+
 bool QmlScanner::readAndHashFile(const QString& path, QByteArray& data) {
+	QElapsedTimer t;
+	t.start();
 	auto file = QFile(path);
 	if (!file.open(QFile::ReadOnly)) return false;
 	data = file.readAll();
 	this->fileHashes.insert(path, QCryptographicHash::hash(data, QCryptographicHash::Md5));
+	readNs += t.nsecsElapsed();
 	return true;
 }
 
@@ -42,8 +50,9 @@ bool QmlScanner::hasFileContentChanged(const QString& path) const {
 }
 
 void QmlScanner::scanDir(const QDir& dir) {
-	if (this->scannedDirs.contains(dir)) return;
-	this->scannedDirs.push_back(dir);
+	auto key = QDir::cleanPath(dir.absolutePath());
+	if (this->scannedDirs.contains(key)) return;
+	this->scannedDirs.insert(key);
 
 	const auto& path = dir.path();
 
@@ -58,7 +67,11 @@ void QmlScanner::scanDir(const QDir& dir) {
 	bool seenQmldir = false;
 	auto entries = QVector<Entry>();
 
-	for (auto& name: dir.entryList(QDir::Files | QDir::NoDotAndDotDot)) {
+	QElapsedTimer listTimer;
+	listTimer.start();
+	auto names = dir.entryList(QDir::Files | QDir::NoDotAndDotDot);
+	listNs += listTimer.nsecsElapsed();
+	for (auto& name: names) {
 		if (name == "qmldir") {
 			qCDebug(
 			    logQmlScanner
@@ -151,6 +164,8 @@ bool QmlScanner::scanQmlFile(const QString& path, bool& singleton, bool& interna
 		this->scanErrors.append({.file = path, .message = std::move(error), .line = lineNum});
 	};
 
+	QElapsedTimer lineTimer;
+	lineTimer.start();
 	while (!stream.atEnd()) {
 		++lineNum;
 		bool hideMask = false;
@@ -232,6 +247,9 @@ bool QmlScanner::scanQmlFile(const QString& path, bool& singleton, bool& interna
 	next:;
 	}
 
+	parseNs += lineTimer.nsecsElapsed();
+	if (lineTimer.elapsed() > 50) qInfo() << "Scanner: slow parse of" << path << lineTimer.elapsed() << "ms";
+
 	if (!ifScopes.isEmpty()) {
 		postError("unclosed preprocessor if block");
 	}
@@ -250,6 +268,8 @@ bool QmlScanner::scanQmlFile(const QString& path, bool& singleton, bool& interna
 	this->scanDir(currentdir);
 
 	for (auto& import: imports) {
+		QElapsedTimer importTimer;
+		importTimer.start();
 		QString ipath;
 		if (import.startsWith("root:")) {
 			auto path = import.sliced(5);
@@ -259,10 +279,14 @@ bool QmlScanner::scanQmlFile(const QString& path, bool& singleton, bool& interna
 			ipath = currentdir.filePath(import);
 		}
 
+		QElapsedTimer statTimer;
+		statTimer.start();
 		auto pathInfo = QFileInfo(ipath);
 		auto cpath = pathInfo.absoluteFilePath();
+		auto pathExists = pathInfo.exists();
+		statNs += statTimer.nsecsElapsed();
 
-		if (!pathInfo.exists()) {
+		if (!pathExists) {
 			qCWarning(logQmlScanner) << "Ignoring unresolvable import" << ipath << "from" << path;
 			continue;
 		}
@@ -286,6 +310,7 @@ void QmlScanner::scanQmlRoot(const QString& path) {
 	bool singleton = false;
 	bool internal = false;
 	this->scanQmlFile(path, singleton, internal);
+	qInfo() << "Scanner: read" << readNs / 1000000 << "ms, parse" << parseNs / 1000000 << "ms, list" << listNs / 1000000 << "ms, stat" << statNs / 1000000 << "ms";
 }
 
 bool QmlScanner::scanQmlJson(const QString& path) {

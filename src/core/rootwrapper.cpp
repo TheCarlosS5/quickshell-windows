@@ -62,8 +62,10 @@ void RootWrapper::reloadGraph(bool hard) {
 	auto rootPath = rootFile.dir();
 	auto scanner = QmlScanner(rootPath);
 	scanner.scanQmlRoot(this->rootPath);
+	qInfo() << "Startup: config scanned," << scanner.scannedFiles.size() << "files";
 
 	qs::core::QmlToolingSupport::updateTooling(rootPath, scanner);
+	qInfo() << "Startup: tooling checked";
 	this->configDirWatcher.addPath(rootPath.path());
 
 	// todo: move into EngineGeneration
