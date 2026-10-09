@@ -10,6 +10,7 @@
 #include <qqmlcomponent.h>
 #include <qqmlengine.h>
 #include <qquickitem.h>
+#include <qtenvironmentvariables.h>
 #include <qtmetamacros.h>
 #include <qurl.h>
 
@@ -17,6 +18,8 @@
 #include "../window/floatingwindow.hpp"
 #include "generation.hpp"
 #include "instanceinfo.hpp"
+#include "paths.hpp"
+#include "qmltree.hpp"
 #include "qmlglobal.hpp"
 #include "scan.hpp"
 #include "toolsupport.hpp"
@@ -95,12 +98,24 @@ void RootWrapper::reloadGraph(bool hard) {
 		return;
 	}
 
+	// The config as real files, so Qt keeps its compiled QML between starts (qmltree.hpp).
+	// QS_NO_QMLTREE=1 loads it through qs: as upstream does.
+	QString treeRoot;
+	if (!qEnvironmentVariableIsSet("QS_NO_QMLTREE")) {
+		treeRoot = qs::core::materializeQmlTree(rootPath, scanner, QsPaths::instance()->shellCacheDir());
+	}
+
 	auto* generation = new EngineGeneration(rootPath, std::move(scanner));
 	generation->wrapper = this;
 
 	QUrl url;
-	url.setScheme("qs");
-	url.setPath("@/qs/" % rootFile.fileName());
+	if (!treeRoot.isEmpty()) {
+		generation->useQmlTree(treeRoot);
+		url = QUrl::fromLocalFile(QDir(treeRoot).filePath("qs/" % rootFile.fileName()));
+	} else {
+		url.setScheme("qs");
+		url.setPath("@/qs/" % rootFile.fileName());
+	}
 	auto component = QQmlComponent(generation->engine, url);
 
 	if (!component.isReady()) {

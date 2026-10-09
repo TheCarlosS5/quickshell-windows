@@ -38,6 +38,12 @@ QUrl QsUrlInterceptor::intercept(
 	}
 #endif
 
+	if (url.scheme() == "root" && !this->treeRoot.isEmpty()) {
+		auto path = url.path();
+		if (path.startsWith('/')) path = path.sliced(1);
+		return QUrl::fromLocalFile(QDir(this->treeRoot).filePath("qs/" % path));
+	}
+
 	if (url.scheme() == "root") {
 		url.setScheme("qs");
 

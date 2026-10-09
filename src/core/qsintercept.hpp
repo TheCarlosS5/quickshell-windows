@@ -19,9 +19,12 @@ public:
 	explicit QsUrlInterceptor(const QDir& configRoot): configRoot(configRoot) {}
 
 	QUrl intercept(const QUrl& originalUrl, QQmlAbstractUrlInterceptor::DataType type) override;
+	// root: URLs point into the real-file mirror of the config (qmltree.hpp).
+	void setTreeRoot(const QString& importRoot) { this->treeRoot = importRoot; }
 
 private:
 	QDir configRoot;
+	QString treeRoot;
 };
 
 class QsInterceptDataReply: public QNetworkReply {

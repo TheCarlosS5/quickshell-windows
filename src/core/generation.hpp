@@ -43,6 +43,9 @@ public:
 
 	void trackWindowIncubationController(QQuickWindow* window);
 
+	// Imports the config from a real-file mirror (see qmltree.hpp) instead of qs:@/.
+	void useQmlTree(const QString& importRoot);
+
 	// takes ownership
 	void registerExtension(const void* key, EngineGenerationExt* extension);
 	EngineGenerationExt* findExtension(const void* key);

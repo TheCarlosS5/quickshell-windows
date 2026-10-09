@@ -62,6 +62,16 @@ EngineGeneration::EngineGeneration(const QDir& rootPath, QmlScanner scanner)
 
 EngineGeneration::EngineGeneration(): EngineGeneration(QDir(), QmlScanner()) {}
 
+void EngineGeneration::useQmlTree(const QString& importRoot) {
+	// Only one way to the config's modules: the same type through two URLs would be two types
+	// (and two instances of every singleton).
+	auto paths = this->engine->importPathList();
+	paths.removeAll("qs:@/");
+	paths.prepend(importRoot);
+	this->engine->setImportPathList(paths);
+	this->urlInterceptor.setTreeRoot(importRoot);
+}
+
 EngineGeneration::~EngineGeneration() {
 	for (auto* extension: this->extensions.values()) {
 		delete extension;
