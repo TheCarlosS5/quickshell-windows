@@ -6,6 +6,7 @@
 #include <qelapsedtimer.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
+#include <qprocess.h>
 #include <qwineventnotifier.h>
 
 #include <windows.h>
@@ -94,6 +95,16 @@ VirtualDesktops::VirtualDesktops(QObject* parent): QObject(parent) {
 	this->watch();
 	this->reload();
 
+	// One check at startup, off the GUI thread's way: exit code 0 = supported.
+	auto* probe = new QProcess(this);
+	QObject::connect(probe, &QProcess::finished, this, [this, probe](int code, QProcess::ExitStatus status) {
+		this->mDirect = status == QProcess::NormalExit && code == 0;
+		qCInfo(logDesktops) << "Direct desktop control (ii-shim vdesk):" << (this->mDirect ? "yes" : "no");
+		probe->deleteLater();
+	});
+	QObject::connect(probe, &QProcess::errorOccurred, probe, &QObject::deleteLater);
+	probe->start("ii-shim", {"vdesk", "probe"});
+
 	this->pacer.setInterval(120);
 	QObject::connect(&this->pacer, &QTimer::timeout, this, &VirtualDesktops::step);
 	// Each shortcut sent waits for Windows to show its effect before the next one.
@@ -168,8 +179,22 @@ bool VirtualDesktops::onOtherDesktop(quintptr hwnd) const {
 	return !onCurrent && this->desktopOf(hwnd) >= 0;
 }
 
+bool VirtualDesktops::runVdesk(const QStringList& args) {
+	return QProcess::startDetached("ii-shim", QStringList {"vdesk"} + args);
+}
+
+bool VirtualDesktops::moveWindow(quintptr hwnd, qsizetype index) {
+	if (!this->mDirect || index < 0 || index >= this->count()) return false;
+	return runVdesk({"move", QString::number(hwnd), QString::number(index + 1)});
+}
+
 void VirtualDesktops::switchTo(qsizetype index) {
-	this->target = std::clamp<qsizetype>(index, 0, this->count() - 1);
+	index = std::clamp<qsizetype>(index, 0, this->count() - 1);
+	if (this->mDirect && index != this->mCurrent && runVdesk({"switch", QString::number(index + 1)})) {
+		this->clear();
+		return;
+	}
+	this->target = index;
 	this->closing = QUuid();
 	this->returnTo = QUuid();
 	this->step();
@@ -186,6 +211,7 @@ void VirtualDesktops::create() {
 
 void VirtualDesktops::remove(qsizetype index) {
 	if (this->count() <= 1 || index < 0 || index >= this->ids.size()) return;
+	if (this->mDirect && runVdesk({"remove", QString::number(index + 1)})) return;
 	// By id: indexes shift if desktops change meanwhile. Like Task View, closing another desktop
 	// leaves the user where they were (Windows only closes the current one: go there and back).
 	this->closing = this->ids.at(index);

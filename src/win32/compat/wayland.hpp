@@ -211,8 +211,10 @@ private:
 };
 
 /// Session lock. Windows' own lock screen is the only secure one, so locking calls
-/// LockWorkStation(); the QML lock surface is never shown. windowsUnlocked() fires when the
-/// user unlocks Windows so the shell can reset its lock state.
+/// LockWorkStation(); the QML lock surface is never shown. A lock the shell asks for gives its
+/// lock animation a moment before Windows locks. windowsLocked() fires when Windows locks by
+/// itself (Win+L, idle, lid) so the shell can show its locked state underneath, and
+/// windowsUnlocked() when the user unlocks so the shell can leave it (with its animation).
 class WlSessionLock: public QObject {
 	Q_OBJECT;
 	Q_PROPERTY(bool locked READ isLocked WRITE setLocked NOTIFY lockStateChanged);
@@ -237,9 +239,11 @@ signals:
 	void secureStateChanged();
 	void surfaceComponentChanged();
 	void windowsUnlocked();
+	void windowsLocked();
 
 private:
 	bool mLocked = false;
+	bool sessionLocked = false; // Windows' lock screen is up
 	QQmlComponent* mSurface = nullptr;
 };
 

@@ -86,11 +86,14 @@ public:
 	void setRegion(QWindow* window, const QRegion& region, bool hasMask);
 	void remove(QWindow* window);
 
-private slots:
+public slots:
 	void poll();
+	// The pointer moved: poll once, soon (moves come by the hundred per second).
+	void cursorMoved();
 
 private:
 	explicit InputRegions(QObject* parent = nullptr);
+	bool pollQueued = false;
 	void setPassthrough(QWindow* window, bool passthrough);
 
 	struct Entry {

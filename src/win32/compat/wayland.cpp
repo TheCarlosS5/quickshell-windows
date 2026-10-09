@@ -331,11 +331,20 @@ void IdleInhibitor::apply() {
 // WlSessionLock
 
 WlSessionLock::WlSessionLock(QObject* parent): QObject(parent) {
+	QObject::connect(SessionEvents::instance(), &SessionEvents::locked, this, [this]() {
+		this->sessionLocked = true;
+		if (this->mLocked) return;
+		this->mLocked = true;
+		emit this->lockStateChanged();
+		emit this->secureStateChanged();
+		emit this->windowsLocked();
+	});
 	QObject::connect(
 	    SessionEvents::instance(),
 	    &SessionEvents::unlocked,
 	    this,
 	    [this]() {
+		    this->sessionLocked = false;
 		    if (!this->mLocked) return;
 		    this->mLocked = false;
 		    emit this->lockStateChanged();
@@ -349,9 +358,12 @@ void WlSessionLock::setLocked(bool locked) {
 	if (locked == this->mLocked) return;
 	this->mLocked = locked;
 
-	if (locked) {
+	if (locked && !this->sessionLocked) {
 		qCInfo(logCompat) << "Session lock requested, using the Windows lock screen";
-		LockWorkStation();
+		// The shell's lock animation (blurred, zoomed wallpaper) first, then Windows' lock.
+		QTimer::singleShot(450, this, [this]() {
+			if (this->mLocked && !this->sessionLocked) LockWorkStation();
+		});
 	}
 
 	emit this->lockStateChanged();

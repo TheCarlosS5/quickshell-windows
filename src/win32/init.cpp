@@ -6,6 +6,8 @@
 #include <qregion.h>
 #include <qwindow.h>
 
+#include <windows.h>
+
 #include "../core/plugin.hpp"
 #include "../window/proxywindow.hpp"
 #include "fonts.hpp"
@@ -25,6 +27,14 @@ class Win32Plugin: public QsEnginePlugin {
 		// the overview stayed on its first frame until the mouse moved). The basic loop
 		// drives animations from the GUI thread and renders them reliably.
 		if (qEnvironmentVariableIsEmpty("QSG_RENDER_LOOP")) qputenv("QSG_RENDER_LOOP", "basic");
+
+		// A shell is never the foreground app, so on battery Windows may throttle it as background
+		// work (EcoQoS: efficiency cores, low clocks): hovers and animations then stutter. Opt out.
+		PROCESS_POWER_THROTTLING_STATE throttling {};
+		throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+		throttling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+		throttling.StateMask = 0;
+		SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof(throttling));
 
 		// <exe>/bin holds Windows stand-ins for the small Linux commands configs call
 		// (qalc, xdg-open, notify-send, ...); child processes resolve them through PATH.

@@ -40,6 +40,11 @@ public:
 	void create();
 	// Closes a desktop (its windows move to a neighbour, as in Task View).
 	void remove(qsizetype index);
+	// Moves another app's window to a desktop. Needs `ii-shim vdesk` (Windows 11 24H2+).
+	bool moveWindow(quintptr hwnd, qsizetype index);
+	// Explorer's internal desktop interface is usable through `ii-shim vdesk`: direct switches,
+	// closing without visiting, moving windows. Otherwise Windows' shortcuts, one step at a time.
+	[[nodiscard]] bool direct() const { return this->mDirect; }
 
 signals:
 	void changed();
@@ -67,6 +72,8 @@ private:
 	bool inFlight = false;
 	QElapsedTimer sentAt;
 	QTimer pacer;
+	bool mDirect = false;
+	static bool runVdesk(const QStringList& args);
 };
 
 } // namespace qs::win32

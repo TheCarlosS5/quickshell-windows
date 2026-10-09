@@ -291,10 +291,28 @@ void LayerManager::enterFullscreen(quintptr monitor) {
 
 // InputRegions
 
+namespace {
+void CALLBACK onCursorMoved(HWINEVENTHOOK, DWORD, HWND, LONG idObject, LONG, DWORD, DWORD) {
+	if (idObject == OBJID_CURSOR) InputRegions::instance()->cursorMoved();
+}
+} // namespace
+
+// Which windows let clicks through depends on where the pointer is. Windows reports every pointer
+// move (out of context, nothing injected), so the check runs only while the mouse moves; a slow
+// timer catches what moves under a still pointer. Polling every 16 ms kept laptops from idling.
 InputRegions::InputRegions(QObject* parent): QObject(parent) {
-	this->timer.setInterval(16);
-	this->timer.setTimerType(Qt::PreciseTimer);
+	this->timer.setInterval(250);
 	QObject::connect(&this->timer, &QTimer::timeout, this, &InputRegions::poll);
+	SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, nullptr, onCursorMoved, 0, 0, WINEVENT_OUTOFCONTEXT);
+}
+
+void InputRegions::cursorMoved() {
+	if (this->pollQueued || this->entries.isEmpty()) return;
+	this->pollQueued = true;
+	QMetaObject::invokeMethod(this, [this]() {
+		this->pollQueued = false;
+		this->poll();
+	}, Qt::QueuedConnection);
 }
 
 InputRegions* InputRegions::instance() {

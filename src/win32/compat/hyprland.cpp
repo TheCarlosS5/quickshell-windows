@@ -448,6 +448,21 @@ void HyprlandIpcQml::focusWorkspace(const QString& spec) {
 	desktops->switchTo(index);
 }
 
+void HyprlandIpcQml::moveToWorkspace(const QString& spec, quintptr hwnd) {
+	auto index = HyprlandIpcQml::workspaceIndex(spec);
+	if (!hwnd || index < 0) return;
+	// Never the shell's own surfaces or Explorer's desktop and taskbar.
+	DWORD pid = 0;
+	GetWindowThreadProcessId(reinterpret_cast<HWND>(hwnd), &pid); // NOLINT
+	if (pid == GetCurrentProcessId()) return;
+	wchar_t cls[64] {};
+	GetClassNameW(reinterpret_cast<HWND>(hwnd), cls, 64); // NOLINT
+	if (wcscmp(cls, L"Progman") == 0 || wcscmp(cls, L"WorkerW") == 0 || wcsstr(cls, L"TrayWnd")) return;
+	if (!VirtualDesktops::instance()->moveWindow(hwnd, index)) {
+		qCInfo(logHyprCompat) << "Can't move windows between desktops on this Windows (needs 24H2+)";
+	}
+}
+
 void HyprlandIpcQml::syncScreens() {
 	auto screens = QGuiApplication::screens();
 
@@ -525,6 +540,15 @@ void HyprlandIpcQml::dispatch(const QString& request) {
 			// ii-windows' own: close a virtual desktop (Hyprland removes empty workspaces itself).
 			auto index = HyprlandIpcQml::workspaceIndex(workspaceMatch.captured(1));
 			if (index >= 0 && index < VirtualDesktops::instance()->count()) VirtualDesktops::instance()->remove(index);
+		} else if (name == "ii.desktop.dropEmpty" && workspaceMatch.hasMatch()) {
+			// ii-windows' own: an empty desktop the user left, removed as Hyprland drops empty
+			// workspaces; only when it can be done without visiting it (no flicker).
+			auto index = HyprlandIpcQml::workspaceIndex(workspaceMatch.captured(1));
+			auto* desktops = VirtualDesktops::instance();
+			if (desktops->direct() && index > 0 && index < desktops->count() && index != desktops->current()) desktops->remove(index);
+		} else if (name == "window.move" && workspaceMatch.hasMatch()) {
+			// The overview's drag to another desktop (only to desktops that exist).
+			HyprlandIpcQml::moveToWorkspace(workspaceMatch.captured(1), address ? address : reinterpret_cast<quintptr>(GetForegroundWindow())); // NOLINT
 		} else if (name == "focus" && address) {
 			WindowTracker::forceForeground(address);
 		} else if (name == "window.close" && address) {
@@ -563,6 +587,11 @@ void HyprlandIpcQml::dispatch(const QString& request) {
 		if (auto hwnd = addressArg()) PostMessageW(reinterpret_cast<HWND>(hwnd), WM_CLOSE, 0, 0); // NOLINT
 	} else if (dispatcher == "workspace") {
 		HyprlandIpcQml::focusWorkspace(args);
+	} else if (dispatcher == "movetoworkspace" || dispatcher == "movetoworkspacesilent") {
+		// "N" (the window in front, Win+Shift+N) or "N,address:0x...".
+		auto hwnd = addressArg();
+		HyprlandIpcQml::moveToWorkspace(args.section(',', 0, 0), hwnd ? hwnd : reinterpret_cast<quintptr>(GetForegroundWindow())); // NOLINT
+		if (dispatcher == "movetoworkspace") HyprlandIpcQml::focusWorkspace(args.section(',', 0, 0));
 	} else if (dispatcher == "killactive") {
 		if (auto* fg = GetForegroundWindow()) PostMessageW(fg, WM_CLOSE, 0, 0);
 	} else {

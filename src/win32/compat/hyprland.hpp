@@ -242,6 +242,7 @@ private:
 	// Hyprland's `workspace` argument: "3", "r+1", "e-1", "+1"... -> desktop index, or -1.
 	[[nodiscard]] static qsizetype workspaceIndex(QString spec);
 	static void focusWorkspace(const QString& spec);
+	static void moveToWorkspace(const QString& spec, quintptr hwnd);
 
 	ObjectModel<HyprlandMonitor> mMonitors {this};
 	ObjectModel<HyprlandWorkspace> mWorkspaces {this};
