@@ -1,4 +1,5 @@
 qt_add_library(quickshell-win32 STATIC
+	clock.cpp
 	native.cpp
 	panel_window.cpp
 	toplevels.cpp
