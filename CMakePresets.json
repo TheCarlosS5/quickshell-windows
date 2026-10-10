@@ -1,0 +1,46 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "windows-release",
+      "displayName": "Windows (Release, clang-cl, Ninja)",
+      "description": "The Windows backend. Linux services (Wayland, X11, i3, DBus services, PAM...) are off: src/win32 provides the same QML modules. Needs clang-cl, the MSVC/Windows SDK environment and Qt >= 6.12 (CMAKE_PREFIX_PATH or QTDIR) with private headers. Single-config generator, so the build type is explicit.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl",
+        "DISTRIBUTOR": "ii-windows (TheCarlosS5/quickshell-windows)",
+        "CRASHREPORT_URL": "https://github.com/TheCarlosS5/ii-windows/issues/new",
+        "WAYLAND": "OFF",
+        "X11": "OFF",
+        "I3": "OFF",
+        "SERVICE_STATUS_NOTIFIER": "OFF",
+        "SERVICE_PIPEWIRE": "OFF",
+        "SERVICE_MPRIS": "OFF",
+        "SERVICE_PAM": "OFF",
+        "SERVICE_POLKIT": "OFF",
+        "SERVICE_GREETD": "OFF",
+        "SERVICE_UPOWER": "OFF",
+        "SERVICE_NOTIFICATIONS": "OFF",
+        "BLUETOOTH": "OFF",
+        "NETWORK": "OFF",
+        "CRASH_HANDLER": "OFF",
+        "USE_JEMALLOC": "OFF"
+      }
+    },
+    {
+      "name": "windows-debug",
+      "inherits": "windows-release",
+      "displayName": "Windows (Debug, diagnostics only)",
+      "binaryDir": "${sourceDir}/build-debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "windows-release", "configurePreset": "windows-release" },
+    { "name": "windows-debug", "configurePreset": "windows-debug" }
+  ]
+}
