@@ -1,4 +1,5 @@
 #include "notifications.hpp"
+#include <atomic>
 #include <condition_variable>
 #include <mutex>
 #include <set>
@@ -57,6 +58,8 @@ QString NotificationCloseReason::toString(NotificationCloseReason::Enum value) {
 namespace {
 
 constexpr ULONG_PTR COPYDATA_NOTIFICATION = 0x49490010;
+// Health report to ii-host (host/src/health.cpp, protocol version 1).
+constexpr ULONG_PTR COPYDATA_SERVICE_STATE = 0x49490020;
 constexpr int POLL_MS = 1000;
 
 QString toQ(const winrt::hstring& s) { return QString::fromWCharArray(s.c_str(), static_cast<qsizetype>(s.size())); }
@@ -126,7 +129,56 @@ public:
 private:
 	Backend() {
 		this->createSink();
+		this->readHostHandshake();
 		std::thread([this]() { this->pollToasts(); }).detach();
+	}
+
+	// ii-host starts the shell with II_HOST_HWND (its window), II_INSTANCE_ID (an id for this
+	// launch) and II_PROTOCOL_VERSION. Without them (quickshell run by hand) nothing is reported
+	// and the host, if any, simply never switches Windows' banners off.
+	void readHostHandshake() {
+		const auto host = qEnvironmentVariable("II_HOST_HWND").toULongLong();
+		this->instanceId = qEnvironmentVariable("II_INSTANCE_ID");
+		if (host != 0 && !this->instanceId.isEmpty() && qEnvironmentVariable("II_PROTOCOL_VERSION") == QStringLiteral("1")) {
+			this->hostHwnd = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(host)); // NOLINT
+		}
+	}
+
+	// Worker thread. What this listener really does, for the host to act on: the host switches
+	// Windows' banners off only on a fresh "available / granted / subscribed", so a denied or
+	// revoked permission, a failing poll, or this thread hanging all end with Windows' own banners
+	// back. A heartbeat proves this loop is alive, not that the whole shell is ready.
+	void reportHealth(const char* state, const char* permission, bool subscribed) {
+		if (this->hostHwnd == nullptr) return;
+		DWORD session = 0;
+		ProcessIdToSessionId(GetCurrentProcessId(), &session);
+		const auto json = QStringLiteral(
+		                      "{\"protocolVersion\":1,\"instanceId\":\"%1\",\"sessionId\":%2,\"requestId\":\"%3\","
+		                      "\"messageType\":\"service-state\",\"service\":\"notifications\",\"state\":\"%4\","
+		                      "\"permission\":\"%5\",\"subscribed\":%6,\"observedAtMonotonicMs\":%7,\"error\":null}"
+		)
+		                      .arg(this->instanceId)
+		                      .arg(session)
+		                      .arg(++this->requestCounter)
+		                      .arg(QLatin1String(state), QLatin1String(permission))
+		                      .arg(subscribed ? QStringLiteral("true") : QStringLiteral("false"))
+		                      .arg(static_cast<qulonglong>(GetTickCount64()));
+		auto wide = json.toStdWString();
+		COPYDATASTRUCT data {};
+		data.dwData = COPYDATA_SERVICE_STATE;
+		data.cbData = static_cast<DWORD>((wide.size() + 1) * sizeof(wchar_t));
+		data.lpData = wide.data();
+		DWORD_PTR result = 0;
+		// A short timeout: a host that is busy or gone must never stall the poll loop.
+		SendMessageTimeoutW(
+		    this->hostHwnd,
+		    WM_COPYDATA,
+		    reinterpret_cast<WPARAM>(this->sinkHwnd), // NOLINT
+		    reinterpret_cast<LPARAM>(&data),          // NOLINT
+		    SMTO_ABORTIFHUNG,
+		    250,
+		    &result
+		);
 	}
 
 	static DesktopEntry* findEntry(const QString& appId, const QString& appName) {
@@ -148,7 +200,7 @@ private:
 		wc.lpszClassName = L"IiShellNotificationSink";
 		RegisterClassW(&wc);
 		// Hidden top-level (not message-only) so FindWindow in ii-shim finds it.
-		auto* sink = CreateWindowExW(
+		auto* sink = this->sinkHwnd = CreateWindowExW(
 		    WS_EX_TOOLWINDOW,
 		    wc.lpszClassName,
 		    L"ii shell notifications",
@@ -166,21 +218,48 @@ private:
 	}
 
 	// Worker thread (MTA): poll the toast list, report new and removed toasts, apply removals.
+	// The permission is re-read on every turn (a cheap query that never prompts), so a revocation
+	// is noticed within a second, and a grant given later makes the listener start by itself.
 	void pollToasts() {
 		try {
 			winrt::init_apartment(winrt::apartment_type::multi_threaded);
 			auto listener = UserNotificationListener::Current();
-			auto access = listener.RequestAccessAsync().get();
-			if (access != UserNotificationListenerAccessStatus::Allowed) {
-				qCWarning(logNotifs) << "Windows denied access to notifications"
-				                     << "(Settings > Privacy > Notifications); only shell notifications will show";
-				return;
+			if (listener.GetAccessStatus() == UserNotificationListenerAccessStatus::Unspecified) {
+				this->reportHealth("permission-required", "unknown", false);
+				listener.RequestAccessAsync().get(); // asks the user, once
 			}
-			qCInfo(logNotifs) << "Reading Windows notifications";
 
 			std::set<quint32> known;
 			auto first = true;
+			auto announcedDenied = false;
+			auto announcedReading = false;
 			while (true) {
+				const auto access = listener.GetAccessStatus();
+				if (access != UserNotificationListenerAccessStatus::Allowed) {
+					if (!announcedDenied) {
+						qCWarning(logNotifs) << "Windows has not granted access to notifications"
+						                     << "(Settings > Privacy > Notifications); Windows keeps showing its own banners"
+						                     << "and the shell shows only its own notifications until it is granted";
+						announcedDenied = true;
+						announcedReading = false;
+					}
+					this->reportHealth(
+					    "permission-required",
+					    access == UserNotificationListenerAccessStatus::Denied ? "denied" : "unknown",
+					    false
+					);
+					known.clear();
+					first = true; // what is there when access returns is history, not news
+					std::unique_lock lock(this->mutex);
+					this->wake.wait_for(lock, std::chrono::milliseconds(POLL_MS));
+					continue;
+				}
+				announcedDenied = false;
+				if (!announcedReading) {
+					qCInfo(logNotifs) << "Reading Windows notifications";
+					announcedReading = true;
+				}
+
 				std::vector<quint32> removals;
 				{
 					std::scoped_lock lock(this->mutex);
@@ -193,6 +272,7 @@ private:
 				}
 
 				std::set<quint32> current;
+				auto pollOk = true;
 				try {
 					auto list = listener.GetNotificationsAsync(NotificationKinds::Toast).get();
 					for (const auto& toast: list) {
@@ -204,8 +284,12 @@ private:
 						QMetaObject::invokeMethod(this, [this, data]() { this->deliver(data); });
 					}
 				} catch (const winrt::hresult_error& e) {
+					pollOk = false;
 					qCWarning(logNotifs) << "Reading notifications failed:" << toQ(e.message());
 				}
+
+				// Reported after the read, so a loop that is stuck in it stops reporting.
+				this->reportHealth(pollOk ? "available" : "error", "granted", pollOk);
 
 				for (auto id: known) {
 					if (!current.contains(id)) QMetaObject::invokeMethod(this, [this, id]() { this->toastRemoved(id); });
@@ -220,6 +304,7 @@ private:
 			}
 		} catch (const winrt::hresult_error& e) {
 			qCWarning(logNotifs) << "Windows notifications unavailable:" << toQ(e.message());
+			this->reportHealth("error", "unknown", false);
 		}
 	}
 
@@ -283,6 +368,10 @@ private:
 	}
 
 	quint32 nextId = 1;
+	HWND sinkHwnd = nullptr;
+	HWND hostHwnd = nullptr;
+	QString instanceId;
+	std::atomic<quint64> requestCounter = 0;
 	std::mutex mutex;
 	std::condition_variable wake;
 	std::vector<quint32> pendingRemovals;
