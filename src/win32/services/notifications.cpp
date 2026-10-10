@@ -88,8 +88,14 @@ public:
 		}
 
 		auto* notification = new Notification(this->nextId++, std::move(data), desktopEntry, this);
-		qCInfo(logNotifs) << "Notification" << notification->id() << "from" << notification->appName() << ":"
-		                  << notification->summary();
+		// The summary is somebody's message: it does not go into logs (they end up in bug reports).
+		// QS_LOG_NOTIFICATION_TEXT=1 puts it back for local debugging.
+		if (qEnvironmentVariable("QS_LOG_NOTIFICATION_TEXT") == QStringLiteral("1")) {
+			qCInfo(logNotifs) << "Notification" << notification->id() << "from" << notification->appName() << ":"
+			                  << notification->summary();
+		} else {
+			qCInfo(logNotifs) << "Notification" << notification->id() << "from" << notification->appName();
+		}
 
 		for (const auto& server: QList(this->servers)) {
 			if (server) emit server->notification(notification);
