@@ -151,15 +151,18 @@ class SessionEvents: public QObject {
 
 public:
 	static SessionEvents* instance();
-	void dispatch(quint32 event);
+	// `session` is the session id Windows put in the notification (WM_WTSSESSION_CHANGE's lParam).
+	void dispatch(quint32 event, quint32 session);
 
 signals:
 	void locked();
 	void unlocked();
+	void reconnected(); // console/remote connect: the lock state may have changed unseen
 
 private:
 	explicit SessionEvents(QObject* parent = nullptr);
 	quintptr hwnd = 0;
+	quint32 ownSession = 0;
 };
 
 // Routes native messages addressed to our windows (AppBar callbacks) to their owners.

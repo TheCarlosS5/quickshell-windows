@@ -648,7 +648,9 @@ void AppBar::handleCallback(quintptr wParam, qintptr lParam) {
 
 namespace {
 LRESULT CALLBACK sessionWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-	if (msg == WM_WTSSESSION_CHANGE) SessionEvents::instance()->dispatch(static_cast<quint32>(wParam));
+	if (msg == WM_WTSSESSION_CHANGE) {
+		SessionEvents::instance()->dispatch(static_cast<quint32>(wParam), static_cast<quint32>(lParam));
+	}
 	return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 } // namespace
@@ -666,18 +668,34 @@ SessionEvents::SessionEvents(QObject* parent): QObject(parent) {
 	RegisterClassW(&wc);
 	auto* h = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
 	this->hwnd = reinterpret_cast<quintptr>(h);
+	DWORD session = 0;
+	if (ProcessIdToSessionId(GetCurrentProcessId(), &session)) this->ownSession = session;
 	if (!WTSRegisterSessionNotification(h, NOTIFY_FOR_THIS_SESSION)) {
 		qCWarning(logWin32) << "WTSRegisterSessionNotification failed" << GetLastError();
 	}
 }
 
-void SessionEvents::dispatch(quint32 event) {
-	if (event == WTS_SESSION_LOCK) {
+void SessionEvents::dispatch(quint32 event, quint32 session) {
+	// NOTIFY_FOR_THIS_SESSION should only deliver ours; a late or foreign event is still checked.
+	if (session != this->ownSession) {
+		qCInfo(logWin32) << "Ignoring session event" << event << "for session" << session << "(ours is" << this->ownSession << ")";
+		return;
+	}
+	switch (event) {
+	case WTS_SESSION_LOCK:
 		qCInfo(logWin32) << "Session locked";
 		emit this->locked();
-	} else if (event == WTS_SESSION_UNLOCK) {
+		break;
+	case WTS_SESSION_UNLOCK:
 		qCInfo(logWin32) << "Session unlocked";
 		emit this->unlocked();
+		break;
+	case WTS_CONSOLE_CONNECT:
+	case WTS_REMOTE_CONNECT:
+		qCInfo(logWin32) << "Session reconnected";
+		emit this->reconnected();
+		break;
+	default: break;
 	}
 }
 

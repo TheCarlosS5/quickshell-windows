@@ -16,6 +16,7 @@
 #include <qtmetamacros.h>
 
 #include "../../core/model.hpp"
+#include "lockstate.hpp"
 #include "../../core/reload.hpp"
 #include "../toplevels.hpp"
 
@@ -211,14 +212,24 @@ private:
 };
 
 /// Session lock. Windows' own lock screen is the only secure one, so locking calls
-/// LockWorkStation(); the QML lock surface is never shown. A lock the shell asks for gives its
-/// lock animation a moment before Windows locks. windowsLocked() fires when Windows locks by
-/// itself (Win+L, idle, lid) so the shell can show its locked state underneath, and
-/// windowsUnlocked() when the user unlocks so the shell can leave it (with its animation).
+/// LockWorkStation() at once (no decorative delay); the QML lock surface is never shown.
+///
+/// Three things are kept apart (see lockstate.hpp, which is tested on its own):
+///  - `locked`: what the shell wants to present. Setting it to true asks Windows to lock.
+///  - `secure`: true only when Windows has said the session is locked (WTS_SESSION_LOCK for this
+///    session, or a query of the session at startup). LockWorkStation() succeeding does not make
+///    it true: that call only starts the lock. Nothing in QML can make it true or false.
+///  - `state`/`lastError`: unknown, unlocked, requested, accepted, locked or error. If the call
+///    fails or Windows never confirms, lockFailed(reason) fires and the request is withdrawn.
+/// windowsLocked() fires when Windows confirms a lock (including Win+L, idle, lid: no request
+/// from the shell needed) and windowsUnlocked() when the user unlocks, so the shell can leave its
+/// locked presentation. unlock() cancels the shell's own pending request; it never unlocks Windows.
 class WlSessionLock: public QObject {
 	Q_OBJECT;
 	Q_PROPERTY(bool locked READ isLocked WRITE setLocked NOTIFY lockStateChanged);
 	Q_PROPERTY(bool secure READ isSecure NOTIFY secureStateChanged);
+	Q_PROPERTY(QString state READ stateName NOTIFY stateChanged);
+	Q_PROPERTY(QString lastError READ lastError NOTIFY stateChanged);
 	Q_PROPERTY(QQmlComponent* surface READ surface WRITE setSurface NOTIFY surfaceComponentChanged);
 	Q_CLASSINFO("DefaultProperty", "surface");
 	QML_ELEMENT;
@@ -226,9 +237,11 @@ class WlSessionLock: public QObject {
 public:
 	explicit WlSessionLock(QObject* parent = nullptr);
 
-	[[nodiscard]] bool isLocked() const { return this->mLocked; }
+	[[nodiscard]] bool isLocked() const { return this->machine.requested(); }
 	void setLocked(bool locked);
-	[[nodiscard]] bool isSecure() const { return this->mLocked; }
+	[[nodiscard]] bool isSecure() const { return this->machine.secure(); }
+	[[nodiscard]] QString stateName() const { return QString::fromLatin1(LockStateMachine::name(this->machine.state())); }
+	[[nodiscard]] QString lastError() const { return QString::fromStdString(this->machine.lastError()); }
 	[[nodiscard]] QQmlComponent* surface() const { return this->mSurface; }
 	void setSurface(QQmlComponent* surface);
 
@@ -237,13 +250,20 @@ public:
 signals:
 	void lockStateChanged();
 	void secureStateChanged();
+	void stateChanged();
 	void surfaceComponentChanged();
 	void windowsUnlocked();
 	void windowsLocked();
+	void lockFailed(const QString& reason);
 
 private:
-	bool mLocked = false;
-	bool sessionLocked = false; // Windows' lock screen is up
+	using LockStateMachine = qs::win32::compat::LockStateMachine;
+
+	void apply(const LockStateMachine::Effect& effect);
+	void callLockWorkStation(uint64_t generation);
+
+	LockStateMachine machine;
+	QTimer confirmTimer;
 	QQmlComponent* mSurface = nullptr;
 };
 

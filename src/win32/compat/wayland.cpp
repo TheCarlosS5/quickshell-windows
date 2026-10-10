@@ -11,6 +11,7 @@
 
 #include <windows.h>
 #include <dwmapi.h>
+#include <wtsapi32.h>
 
 #include "../../core/logcat.hpp"
 #include "../native.hpp"
@@ -330,44 +331,108 @@ void IdleInhibitor::apply() {
 
 // WlSessionLock
 
-WlSessionLock::WlSessionLock(QObject* parent): QObject(parent) {
-	QObject::connect(SessionEvents::instance(), &SessionEvents::locked, this, [this]() {
-		this->sessionLocked = true;
-		if (this->mLocked) return;
-		this->mLocked = true;
-		emit this->lockStateChanged();
-		emit this->secureStateChanged();
-		emit this->windowsLocked();
-	});
-	QObject::connect(
-	    SessionEvents::instance(),
-	    &SessionEvents::unlocked,
-	    this,
-	    [this]() {
-		    this->sessionLocked = false;
-		    if (!this->mLocked) return;
-		    this->mLocked = false;
-		    emit this->lockStateChanged();
-		    emit this->secureStateChanged();
-		    emit this->windowsUnlocked();
-	    }
+namespace {
+
+// What Windows says about this session right now; Unknown when it cannot be read.
+LockStateMachine::State queryWindowsLockState() {
+	LPWSTR buffer = nullptr;
+	DWORD bytes = 0;
+	auto state = LockStateMachine::State::Unknown;
+	if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSSessionInfoEx, &buffer, &bytes) && buffer
+	    && bytes >= sizeof(WTSINFOEXW))
+	{
+		const auto* info = reinterpret_cast<const WTSINFOEXW*>(buffer); // NOLINT
+		if (info->Level == 1) {
+			const auto flags = info->Data.WTSInfoExLevel1.SessionFlags;
+			if (flags == WTS_SESSIONSTATE_LOCK) state = LockStateMachine::State::Locked;
+			else if (flags == WTS_SESSIONSTATE_UNLOCK) state = LockStateMachine::State::Unlocked;
+		}
+	}
+	if (buffer) WTSFreeMemory(buffer);
+	return state;
+}
+
+QString windowsErrorText(DWORD code) {
+	wchar_t* text = nullptr;
+	FormatMessageW(
+	    FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+	    nullptr,
+	    code,
+	    0,
+	    reinterpret_cast<LPWSTR>(&text), // NOLINT
+	    0,
+	    nullptr
 	);
+	auto result = text ? QString::fromWCharArray(text).trimmed() : QString();
+	if (text) LocalFree(text);
+	return result;
+}
+
+constexpr int LOCK_CONFIRM_TIMEOUT_MS = 5000;
+
+} // namespace
+
+WlSessionLock::WlSessionLock(QObject* parent): QObject(parent) {
+	// A first look at the real session, so starting inside a locked session is not mistaken for
+	// an unlocked one (and a failed read is not mistaken for either).
+	this->machine.init(queryWindowsLockState());
+	qCInfo(logCompat) << "Session lock state at start:" << LockStateMachine::name(this->machine.state());
+
+	this->confirmTimer.setSingleShot(true);
+	this->confirmTimer.setInterval(LOCK_CONFIRM_TIMEOUT_MS);
+	QObject::connect(&this->confirmTimer, &QTimer::timeout, this, [this]() {
+		this->apply(this->machine.confirmTimeout(this->machine.generation()));
+	});
+
+	QObject::connect(SessionEvents::instance(), &SessionEvents::locked, this, [this]() {
+		this->apply(this->machine.sessionEvent(LockStateMachine::SessionEvent::Lock, true));
+	});
+	QObject::connect(SessionEvents::instance(), &SessionEvents::unlocked, this, [this]() {
+		this->apply(this->machine.sessionEvent(LockStateMachine::SessionEvent::Unlock, true));
+	});
+	// Reconnecting (console or RDP) may have changed the lock state without an event we saw.
+	QObject::connect(SessionEvents::instance(), &SessionEvents::reconnected, this, [this]() {
+		this->apply(this->machine.resync(queryWindowsLockState()));
+	});
 }
 
 void WlSessionLock::setLocked(bool locked) {
-	if (locked == this->mLocked) return;
-	this->mLocked = locked;
-
-	if (locked && !this->sessionLocked) {
-		qCInfo(logCompat) << "Session lock requested, using the Windows lock screen";
-		// The shell's lock animation (blurred, zoomed wallpaper) first, then Windows' lock.
-		QTimer::singleShot(450, this, [this]() {
-			if (this->mLocked && !this->sessionLocked) LockWorkStation();
-		});
+	if (locked) {
+		qCInfo(logCompat) << "Session lock requested by the shell";
+		this->apply(this->machine.requestLock());
+	} else {
+		// The shell withdrawing its own request. It cannot unlock Windows: only the user can.
+		if (this->machine.secure()) {
+			qCWarning(logCompat) << "Ignoring a shell 'unlock' while Windows is locked: only Windows can unlock it";
+		}
+		this->apply(this->machine.qmlUnlock());
 	}
+}
 
-	emit this->lockStateChanged();
-	emit this->secureStateChanged();
+void WlSessionLock::callLockWorkStation(uint64_t generation) {
+	// LockWorkStation() only starts the lock; it returns before the session is locked.
+	SetLastError(0);
+	const auto ok = LockWorkStation() != 0;
+	const auto code = ok ? 0 : GetLastError();
+	this->apply(this->machine.lockCallResult(generation, ok, code, windowsErrorText(code).toStdString()));
+}
+
+void WlSessionLock::apply(const LockStateMachine::Effect& effect) {
+	if (effect.cancelConfirm) this->confirmTimer.stop();
+	if (effect.stateChanged) {
+		qCInfo(logCompat) << "Session lock state:" << LockStateMachine::name(this->machine.state());
+		emit this->stateChanged();
+	}
+	if (effect.secureChanged) emit this->secureStateChanged();
+	if (effect.requestedChanged) emit this->lockStateChanged();
+	if (effect.lockedConfirmed) emit this->windowsLocked();
+	if (effect.unlockedConfirmed) emit this->windowsUnlocked();
+	if (effect.failed) {
+		qCWarning(logCompat) << "Session lock failed:" << QString::fromStdString(effect.error);
+		emit this->lockFailed(QString::fromStdString(effect.error));
+	}
+	if (effect.armConfirm) this->confirmTimer.start();
+	if (effect.callLock) this->callLockWorkStation(effect.generation);
 }
 
 void WlSessionLock::setSurface(QQmlComponent* surface) {
