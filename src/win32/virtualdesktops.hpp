@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include <qelapsedtimer.h>
 #include <qlist.h>
 #include <qobject.h>
@@ -44,12 +46,26 @@ public:
 	bool moveWindow(quintptr hwnd, qsizetype index);
 	// Explorer's internal desktop interface is usable through `ii-shim vdesk`: direct switches,
 	// closing without visiting, moving windows. Otherwise Windows' shortcuts, one step at a time.
-	[[nodiscard]] bool direct() const { return this->mDirect; }
+	// Each operation is available on its own: `ii-shim vdesk probe` checks the interface for each of
+	// them on this Windows (no build number is trusted), and one that keeps failing at run time is
+	// switched off for a while (growing back-off) instead of being retried on every request.
+	[[nodiscard]] bool direct() const { return this->canSwitchDirect() || this->canRemoveDirect() || this->canMove(); }
+	[[nodiscard]] bool canSwitchDirect() const { return this->available(Op::Switch); }
+	[[nodiscard]] bool canRemoveDirect() const { return this->available(Op::Remove); }
+	[[nodiscard]] bool canMove() const { return this->available(Op::Move); }
+
+	// Closes the desktop the user just left, but only if it is still exactly as it was when they
+	// left it: same list of desktops in the same order, nobody on it, not named by the user, and
+	// not the first. `index` is the position the caller believes it has; it is checked against the
+	// desktop recorded when the user left, never trusted by itself. Returns whether a removal was
+	// requested (ii-shim re-checks everything right before acting and may still decline).
+	bool removeLeftIfEmpty(qsizetype index);
 
 signals:
 	void changed();
 
 private:
+	enum class Op { Switch, Remove, Move, Count };
 	explicit VirtualDesktops(QObject* parent = nullptr);
 	void reload();
 	void watch();
@@ -72,8 +88,30 @@ private:
 	bool inFlight = false;
 	QElapsedTimer sentAt;
 	QTimer pacer;
-	bool mDirect = false;
-	static bool runVdesk(const QStringList& args);
+
+	// What `ii-shim vdesk probe` said, and how each operation has been doing since.
+	struct OpState {
+		bool verified = false;     // probe said "yes" for it
+		QString reason;            // probe's explanation when it did not
+		int failures = 0;          // consecutive real failures (not "cancelled": those are normal)
+		int trips = 0;             // times it was switched off
+		QElapsedTimer offSince;    // valid while switched off
+		qint64 offForMs = 0;
+	};
+	OpState ops[static_cast<int>(Op::Count)];
+	[[nodiscard]] bool available(Op op) const;
+	// Runs one `ii-shim vdesk` command; `failed` runs if Windows or the shim could not do it
+	// (not when the shim declined because things had changed), so the caller can fall back.
+	bool runVdesk(Op op, const QStringList& args, std::function<void()> failed = {});
+	void recordResult(Op op, int exitCode, const QString& lastLine);
+	void applyProbe(const QString& output);
+
+	// The desktop the user left last, with the ordered list of desktops at that moment.
+	struct Departure {
+		QUuid id;
+		QList<QUuid> ids;
+		QElapsedTimer when;
+	} departure;
 };
 
 } // namespace qs::win32

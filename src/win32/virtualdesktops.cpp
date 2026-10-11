@@ -1,5 +1,6 @@
 #include "virtualdesktops.hpp"
 #include <algorithm>
+#include <functional>
 #include <cstring>
 #include <vector>
 
@@ -95,14 +96,20 @@ VirtualDesktops::VirtualDesktops(QObject* parent): QObject(parent) {
 	this->watch();
 	this->reload();
 
-	// One check at startup, off the GUI thread's way: exit code 0 = supported.
+	// One check at startup, off the GUI thread's way. `ii-shim vdesk probe` prints one line per
+	// operation ("read|switch|remove|move yes" or "no: why") after checking, with calls that change
+	// nothing, that Explorer's interface answers as expected on this Windows.
 	auto* probe = new QProcess(this);
 	QObject::connect(probe, &QProcess::finished, this, [this, probe](int code, QProcess::ExitStatus status) {
-		this->mDirect = status == QProcess::NormalExit && code == 0;
-		qCInfo(logDesktops) << "Direct desktop control (ii-shim vdesk):" << (this->mDirect ? "yes" : "no");
+		auto output = QString::fromUtf8(probe->readAllStandardOutput());
+		if (status != QProcess::NormalExit || code != 0) output.clear(); // reading not verified: nothing is
+		this->applyProbe(output);
 		probe->deleteLater();
 	});
-	QObject::connect(probe, &QProcess::errorOccurred, probe, &QObject::deleteLater);
+	QObject::connect(probe, &QProcess::errorOccurred, probe, [this, probe]() {
+		this->applyProbe({});
+		probe->deleteLater();
+	});
 	probe->start("ii-shim", {"vdesk", "probe"});
 
 	this->pacer.setInterval(120);
@@ -155,6 +162,12 @@ void VirtualDesktops::reload() {
 	}
 
 	if (ids == this->ids && current == this->mCurrent && names == this->names) return;
+	// The user moved to another desktop: remember the one they left, and what the list looked like.
+	if (current != this->mCurrent && this->mCurrent >= 0 && this->mCurrent < this->ids.size() && ids.contains(this->ids.at(this->mCurrent))) {
+		this->departure.id = this->ids.at(this->mCurrent);
+		this->departure.ids = ids;
+		this->departure.when.start();
+	}
 	this->ids = ids;
 	this->names = names;
 	this->mCurrent = current;
@@ -179,25 +192,116 @@ bool VirtualDesktops::onOtherDesktop(quintptr hwnd) const {
 	return !onCurrent && this->desktopOf(hwnd) >= 0;
 }
 
-bool VirtualDesktops::runVdesk(const QStringList& args) {
-	return QProcess::startDetached("ii-shim", QStringList {"vdesk"} + args);
+namespace {
+// Operations that went wrong this many times in a row are switched off for a while.
+constexpr int FAILURES_BEFORE_OFF = 3;
+constexpr qint64 FIRST_BACKOFF_MS = 2 * 60 * 1000;
+constexpr qint64 MAX_BACKOFF_MS = 30 * 60 * 1000;
+constexpr qint64 DEPARTURE_FRESH_MS = 5000;
+
+int opIndex(const QString& name) { return name == QLatin1String("switch") ? 0 : name == QLatin1String("remove") ? 1 : 2; }
+} // namespace
+
+void VirtualDesktops::applyProbe(const QString& output) {
+	auto readOk = false;
+	auto lines = output.split('\n', Qt::SkipEmptyParts);
+	for (auto& line: lines) {
+		auto text = line.trimmed();
+		auto space = text.indexOf(' ');
+		if (space < 0) continue;
+		auto key = text.left(space);
+		auto rest = text.mid(space + 1).trimmed();
+		auto yes = rest == QLatin1String("yes");
+		if (key == QLatin1String("read")) {
+			readOk = yes;
+		} else if (key == QLatin1String("switch") || key == QLatin1String("remove") || key == QLatin1String("move")) {
+			auto& op = this->ops[opIndex(key)];
+			op.verified = yes;
+			op.reason = yes ? QString() : rest;
+		}
+	}
+	if (!readOk) {
+		for (auto& op: this->ops) {
+			op.verified = false;
+			if (op.reason.isEmpty()) op.reason = QStringLiteral("Explorer's desktop interface was not verified on this Windows");
+		}
+	}
+	for (const auto* name: {"switch", "remove", "move"}) {
+		const auto& op = this->ops[opIndex(QString::fromLatin1(name))];
+		qCInfo(logDesktops).noquote() << "Direct desktop control:" << name << (op.verified ? QStringLiteral("yes") : QStringLiteral("no (%1)").arg(op.reason));
+	}
+}
+
+bool VirtualDesktops::available(Op op) const {
+	const auto& state = this->ops[static_cast<int>(op)];
+	if (!state.verified) return false;
+	return !state.offSince.isValid() || state.offSince.hasExpired(state.offForMs);
+}
+
+void VirtualDesktops::recordResult(Op op, int exitCode, const QString& lastLine) {
+	auto& state = this->ops[static_cast<int>(op)];
+	// 0 = done. 6/7 = the shim declined because what was seen had changed or the desktop was
+	// occupied: that is the check working, not a failure.
+	if (exitCode == 0 || exitCode == 6 || exitCode == 7) {
+		state.failures = 0;
+		if (exitCode == 0) state.trips = 0;
+		state.offSince.invalidate();
+		return;
+	}
+	++state.failures;
+	qCWarning(logDesktops) << "ii-shim vdesk failed (exit" << exitCode << "):" << lastLine;
+	// 4: the interface is not there; 5: it stopped answering as verified. Retrying won't help.
+	auto hard = exitCode == 4 || exitCode == 5;
+	if (state.failures >= FAILURES_BEFORE_OFF || hard) {
+		state.offForMs = std::min(MAX_BACKOFF_MS, FIRST_BACKOFF_MS << std::min(state.trips, 4));
+		++state.trips;
+		state.failures = 0;
+		state.offSince.start();
+		qCWarning(logDesktops) << "Direct desktop operation switched off for" << state.offForMs / 1000 << "s; Windows' own shortcuts are used meanwhile";
+	}
+}
+
+bool VirtualDesktops::runVdesk(Op op, const QStringList& args, std::function<void()> failed) {
+	if (!this->available(op)) return false;
+	auto* process = new QProcess(this);
+	QObject::connect(process, &QProcess::finished, this, [this, op, process, failed](int code, QProcess::ExitStatus status) {
+		auto lines = QString::fromUtf8(process->readAllStandardOutput()).trimmed().split('\n');
+		auto last = lines.isEmpty() ? QString() : lines.last().trimmed();
+		auto exitCode = status == QProcess::NormalExit ? code : 1;
+		this->recordResult(op, exitCode, last);
+		if (exitCode != 0 && exitCode != 6 && exitCode != 7 && failed) failed();
+		process->deleteLater();
+	});
+	QObject::connect(process, &QProcess::errorOccurred, this, [this, op, process, failed](QProcess::ProcessError error) {
+		if (error != QProcess::FailedToStart) return; // a crash is reported by finished()
+		this->recordResult(op, 1, QStringLiteral("could not start ii-shim"));
+		if (failed) failed();
+		process->deleteLater();
+	});
+	process->start("ii-shim", QStringList {"vdesk"} + args);
+	return true;
 }
 
 bool VirtualDesktops::moveWindow(quintptr hwnd, qsizetype index) {
-	if (!this->mDirect || index < 0 || index >= this->count()) return false;
-	return runVdesk({"move", QString::number(hwnd), QString::number(index + 1)});
+	if (index < 0 || index >= this->count() || index >= this->ids.size()) return false;
+	// By the desktop's id: a position can be stale by the time the command runs.
+	return this->runVdesk(Op::Move, {"move", QString::number(hwnd), this->ids.at(index).toString(QUuid::WithBraces).toUpper()});
 }
 
 void VirtualDesktops::switchTo(qsizetype index) {
 	index = std::clamp<qsizetype>(index, 0, this->count() - 1);
-	if (this->mDirect && index != this->mCurrent && runVdesk({"switch", QString::number(index + 1)})) {
+	auto viaShortcuts = [this, index]() {
+		this->target = index;
+		this->closing = QUuid();
+		this->returnTo = QUuid();
+		this->step();
+	};
+	if (index != this->mCurrent && index < this->ids.size()
+	    && this->runVdesk(Op::Switch, {"switch", this->ids.at(index).toString(QUuid::WithBraces).toUpper()}, viaShortcuts)) {
 		this->clear();
 		return;
 	}
-	this->target = index;
-	this->closing = QUuid();
-	this->returnTo = QUuid();
-	this->step();
+	viaShortcuts();
 }
 
 void VirtualDesktops::create() {
@@ -211,13 +315,33 @@ void VirtualDesktops::create() {
 
 void VirtualDesktops::remove(qsizetype index) {
 	if (this->count() <= 1 || index < 0 || index >= this->ids.size()) return;
-	if (this->mDirect && runVdesk({"remove", QString::number(index + 1)})) return;
 	// By id: indexes shift if desktops change meanwhile. Like Task View, closing another desktop
 	// leaves the user where they were (Windows only closes the current one: go there and back).
-	this->closing = this->ids.at(index);
-	this->returnTo = index == this->mCurrent ? QUuid() : this->ids.value(this->mCurrent);
-	this->target = index;
-	this->step();
+	auto id = this->ids.at(index);
+	auto viaShortcuts = [this, id]() {
+		auto position = this->ids.indexOf(id);
+		if (position < 0) return; // already gone
+		this->closing = id;
+		this->returnTo = position == this->mCurrent ? QUuid() : this->ids.value(this->mCurrent);
+		this->target = position;
+		this->step();
+	};
+	if (this->runVdesk(Op::Remove, {"remove", id.toString(QUuid::WithBraces).toUpper()}, viaShortcuts)) return;
+	viaShortcuts();
+}
+
+bool VirtualDesktops::removeLeftIfEmpty(qsizetype index) {
+	if (!this->canRemoveDirect()) return false;
+	if (index <= 0 || index >= this->ids.size() || index == this->mCurrent) return false;
+	// Only the desktop the user just left, and only soon after: the caller's number alone is not
+	// enough to decide that a desktop may go.
+	auto id = this->ids.at(index);
+	if (this->departure.id != id || !this->departure.when.isValid() || this->departure.when.hasExpired(DEPARTURE_FRESH_MS)) return false;
+	if (this->departure.ids != this->ids) return false; // the list changed since: not what was decided on
+	if (!this->names.value(index).isEmpty()) return false; // named by the user: theirs to close
+	QStringList seen;
+	for (const auto& d: this->departure.ids) seen.append(d.toString(QUuid::WithBraces).toUpper());
+	return this->runVdesk(Op::Remove, {"remove-empty", id.toString(QUuid::WithBraces).toUpper(), seen.join(',')});
 }
 
 void VirtualDesktops::clear() {

@@ -545,7 +545,9 @@ void HyprlandIpcQml::dispatch(const QString& request) {
 			// workspaces; only when it can be done without visiting it (no flicker).
 			auto index = HyprlandIpcQml::workspaceIndex(workspaceMatch.captured(1));
 			auto* desktops = VirtualDesktops::instance();
-			if (desktops->direct() && index > 0 && index < desktops->count() && index != desktops->current()) desktops->remove(index);
+			// Only the desktop the user just left, only with the list of desktops unchanged, unnamed
+			// and empty: the number sent by the shell is checked against what was recorded (R09).
+			desktops->removeLeftIfEmpty(index);
 		} else if (name == "window.move" && workspaceMatch.hasMatch()) {
 			// The overview's drag to another desktop (only to desktops that exist).
 			HyprlandIpcQml::moveToWorkspace(workspaceMatch.captured(1), address ? address : reinterpret_cast<quintptr>(GetForegroundWindow())); // NOLINT
