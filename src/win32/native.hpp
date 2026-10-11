@@ -99,6 +99,7 @@ private:
 	struct Entry {
 		QRegion region;
 		bool passthrough = false;
+		int lastOutside = -1; // last pointer position relative to the region, for the diagnostics log
 	};
 
 	QHash<QWindow*, Entry> entries;

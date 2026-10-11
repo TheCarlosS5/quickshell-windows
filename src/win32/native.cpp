@@ -23,6 +23,7 @@ namespace qs::win32 {
 
 QS_LOGGING_CATEGORY(logWin32, "quickshell.win32", QtInfoMsg);
 QS_LOGGING_CATEGORY(logAppBar, "quickshell.win32.appbar", QtInfoMsg);
+QS_LOGGING_CATEGORY(logRegions, "quickshell.win32.inputregions", QtInfoMsg);
 
 namespace {
 
@@ -334,6 +335,9 @@ void InputRegions::setRegion(QWindow* window, const QRegion& region, bool hasMas
 	}
 
 	auto& entry = this->entries[window];
+	if (entry.region != region) {
+		qCInfo(logRegions) << "input region of" << window << (window ? window->title() : QString()) << "is now" << region.boundingRect() << "of window" << (window ? window->geometry() : QRect()) << "dpr" << (window ? window->devicePixelRatio() : 1.0);
+	}
 	entry.region = region;
 
 	// An empty mask means the window never takes input.
@@ -377,7 +381,12 @@ void InputRegions::poll() {
 		    static_cast<int>(std::floor((cursor.y - rect.top) / dpr))
 		);
 
-		this->setPassthrough(window, !entry.region.contains(local));
+		auto outside = !entry.region.contains(local);
+		if (entry.lastOutside != (outside ? 1 : 0)) {
+			entry.lastOutside = outside ? 1 : 0;
+			qCInfo(logRegions) << "cursor" << cursor.x << cursor.y << "-> local" << local << (outside ? "outside" : "inside") << "region" << entry.region.boundingRect() << "of" << window->title() << "rect" << rect.left << rect.top << rect.right << rect.bottom << "dpr" << dpr;
+		}
+		this->setPassthrough(window, outside);
 	}
 }
 

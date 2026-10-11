@@ -2,11 +2,13 @@
 #include <cstdlib>
 #include <utility>
 
+#include <qcoreapplication.h>
 #include <qdir.h>
 #include <qfileinfo.h>
 #include <qfilesystemwatcher.h>
 #include <qlogging.h>
 #include <qobject.h>
+#include <qthread.h>
 #include <qqmlcomponent.h>
 #include <qqmlengine.h>
 #include <qquickitem.h>
@@ -46,6 +48,12 @@ RootWrapper::RootWrapper(QString rootPath, QString shellId)
 	this->reloadGraph(true);
 
 	if (this->generation == nullptr) {
+		// The reason was logged on the logger thread: give it the moment it needs to reach the
+		// console and the log file before the process ends (otherwise a failed start can leave
+		// no trace of why).
+		QCoreApplication::processEvents();
+		QThread::msleep(300);
+		QCoreApplication::processEvents();
 		exit(-1); // NOLINT
 	}
 }
