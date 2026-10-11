@@ -85,10 +85,17 @@ QuickshellScreenInfo* screenOf(HWND hwnd) {
 	return nullptr;
 }
 
+// Set as soon as the tracker exists, before anything in its constructor can wait. The hook callbacks
+// must NOT call WindowTracker::instance(): the constructor makes COM calls to Explorer (which pump
+// messages while waiting), the pump delivers a WinEvent, and instance() would then wait for the
+// constructor that this very thread is in the middle of - a self-deadlock that left the shell stuck
+// at start-up now and then (seen on a stack dump: _Init_thread_header under WindowTracker::refresh).
+WindowTracker* constructedTracker = nullptr; // NOLINT
+
 void CALLBACK onWinEvent(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD, DWORD) {
 	if (idObject != OBJID_WINDOW || idChild != CHILDID_SELF) return;
 	if (event == EVENT_OBJECT_LOCATIONCHANGE && (!hwnd || GetAncestor(hwnd, GA_ROOT) != hwnd)) return;
-	WindowTracker::instance()->scheduleRefresh();
+	if (constructedTracker) constructedTracker->scheduleRefresh();
 }
 
 } // namespace
@@ -214,6 +221,7 @@ WindowTracker::WindowTracker(QObject* parent): QObject(parent) {
 	this->debounce.setSingleShot(true);
 	this->debounce.setInterval(40);
 	QObject::connect(&this->debounce, &QTimer::timeout, this, &WindowTracker::refresh);
+	constructedTracker = this;
 
 	// Out-of-context hooks: callbacks arrive on this thread's message loop, nothing is injected.
 	SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, onWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
