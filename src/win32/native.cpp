@@ -23,7 +23,7 @@ namespace qs::win32 {
 
 QS_LOGGING_CATEGORY(logWin32, "quickshell.win32", QtInfoMsg);
 QS_LOGGING_CATEGORY(logAppBar, "quickshell.win32.appbar", QtInfoMsg);
-QS_LOGGING_CATEGORY(logRegions, "quickshell.win32.inputregions", QtInfoMsg);
+QS_LOGGING_CATEGORY(logRegions, "quickshell.win32.inputregions", QtWarningMsg);
 
 namespace {
 
@@ -336,7 +336,7 @@ void InputRegions::setRegion(QWindow* window, const QRegion& region, bool hasMas
 
 	auto& entry = this->entries[window];
 	if (entry.region != region) {
-		qCInfo(logRegions) << "input region of" << window << (window ? window->title() : QString()) << "is now" << region.boundingRect() << "of window" << (window ? window->geometry() : QRect()) << "dpr" << (window ? window->devicePixelRatio() : 1.0);
+		qCDebug(logRegions) << "input region of" << window << (window ? window->title() : QString()) << "is now" << region.boundingRect() << "of window" << (window ? window->geometry() : QRect()) << "dpr" << (window ? window->devicePixelRatio() : 1.0);
 	}
 	entry.region = region;
 
@@ -384,7 +384,7 @@ void InputRegions::poll() {
 		auto outside = !entry.region.contains(local);
 		if (entry.lastOutside != (outside ? 1 : 0)) {
 			entry.lastOutside = outside ? 1 : 0;
-			qCInfo(logRegions) << "cursor" << cursor.x << cursor.y << "-> local" << local << (outside ? "outside" : "inside") << "region" << entry.region.boundingRect() << "of" << window->title() << "rect" << rect.left << rect.top << rect.right << rect.bottom << "dpr" << dpr;
+			qCDebug(logRegions) << "cursor" << cursor.x << cursor.y << "-> local" << local << (outside ? "outside" : "inside") << "region" << entry.region.boundingRect() << "of" << window->title() << "rect" << rect.left << rect.top << rect.right << rect.bottom << "dpr" << dpr;
 		}
 		this->setPassthrough(window, outside);
 	}

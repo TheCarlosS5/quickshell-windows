@@ -33,6 +33,7 @@ void PendingRegion::setItem(QQuickItem* item) {
 	if (this->mItem != nullptr) {
 		QObject::disconnect(this->mItem, nullptr, this, nullptr);
 	}
+	this->trackWindow(nullptr);
 
 	this->mItem = item;
 
@@ -42,12 +43,40 @@ void PendingRegion::setItem(QQuickItem* item) {
 		QObject::connect(this->mItem, &QQuickItem::yChanged, this, &PendingRegion::itemChanged);
 		QObject::connect(this->mItem, &QQuickItem::widthChanged, this, &PendingRegion::itemChanged);
 		QObject::connect(this->mItem, &QQuickItem::heightChanged, this, &PendingRegion::itemChanged);
+		QObject::connect(this->mItem, &QQuickItem::scaleChanged, this, &PendingRegion::itemChanged);
+		QObject::connect(this->mItem, &QQuickItem::rotationChanged, this, &PendingRegion::itemChanged);
+		QObject::connect(this->mItem, &QQuickItem::transformOriginChanged, this, &PendingRegion::itemChanged);
+		QObject::connect(this->mItem, &QQuickItem::windowChanged, this, &PendingRegion::trackWindow);
+		this->trackWindow(this->mItem->window());
 	}
 
 	emit this->itemChanged();
 }
 
-void PendingRegion::onItemDestroyed() { this->mItem = nullptr; }
+void PendingRegion::onItemDestroyed() {
+	this->trackWindow(nullptr);
+	this->mItem = nullptr;
+}
+
+void PendingRegion::trackWindow(QQuickWindow* window) {
+	QObject::disconnect(this->frameConnection);
+	this->frameConnection = {};
+	this->lastSceneRect = QRectF();
+	if (window == nullptr || this->mItem == nullptr) return;
+	this->frameConnection = QObject::connect(window, &QQuickWindow::afterAnimating, this, &PendingRegion::onFrame);
+}
+
+// A transform (Translate, scale, a parent's own animation) moves an item without any signal from
+// the item, so its place on screen is compared once per animation frame. Without this an input
+// region follows the item's FIRST position: a panel that slides in from outside the screen would
+// keep an input region outside the screen and every click inside it would fall through.
+void PendingRegion::onFrame() {
+	if (this->mItem == nullptr) return;
+	auto rect = this->mItem->mapRectToScene(QRectF(0, 0, this->mItem->width(), this->mItem->height()));
+	if (rect == this->lastSceneRect) return;
+	this->lastSceneRect = rect;
+	emit this->itemChanged();
+}
 
 void PendingRegion::onChildDestroyed() { this->mRegions.removeAll(this->sender()); }
 

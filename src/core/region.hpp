@@ -5,6 +5,7 @@
 #include <qqmlintegration.h>
 #include <qqmllist.h>
 #include <qquickitem.h>
+#include <qquickwindow.h>
 #include <qregion.h>
 #include <qtmetamacros.h>
 #include <qtypes.h>
@@ -166,6 +167,10 @@ signals:
 
 private slots:
 	void onItemDestroyed();
+	// The item moved on screen without its own geometry changing (a Translate/scale transform,
+	// a parent moving): checked once per animation frame while an item is set.
+	void onFrame();
+	void trackWindow(QQuickWindow* window);
 	void onChildDestroyed();
 
 private:
@@ -185,6 +190,8 @@ private:
 	};
 
 	QQuickItem* mItem = nullptr;
+	QMetaObject::Connection frameConnection;
+	QRectF lastSceneRect;
 
 	qint32 mX = 0;
 	qint32 mY = 0;
