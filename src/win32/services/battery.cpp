@@ -100,6 +100,12 @@ BatterySnapshot normalizeBattery(bool present, int percent, int remaining, int c
 	// An unknown percentage must never trigger ii's automatic critical-battery suspend.
 	value.percentage = remaining >= 0 && capacity > 0 ? std::clamp(qreal(remaining) / capacity, 0.0, 1.0)
 		: percent >= 0 && percent <= 100 ? percent / 100.0 : 1.0;
+	// A fresh battery report can carry a remaining capacity of 0 (or a stale, tiny full-charge capacity) for a
+	// moment while Windows' own percentage is already right: laptops showed "critically low battery" at every
+	// start with the battery above 80 %. When the two disagree by a lot, Windows' percentage wins.
+	if (remaining >= 0 && capacity > 0 && percent >= 0 && percent <= 100 && std::abs(value.percentage - percent / 100.0) > 0.25) {
+		value.percentage = percent / 100.0;
+	}
 	value.healthSupported = design > 0 && capacity > 0;
 	value.health = value.healthSupported ? std::clamp(qreal(capacity) / design, 0.0, 1.0) : 0;
 	value.rate = rate / 1000.0;
