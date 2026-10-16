@@ -95,6 +95,15 @@ WindowTracker* constructedTracker = nullptr; // NOLINT
 void CALLBACK onWinEvent(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD, DWORD) {
 	if (idObject != OBJID_WINDOW || idChild != CHILDID_SELF) return;
 	if (event == EVENT_OBJECT_LOCATIONCHANGE && (!hwnd || GetAncestor(hwnd, GA_ROOT) != hwnd)) return;
+	// Our own windows (the dock's previews, the bar's popups, the overview...) are never tracked, but each
+	// one that appeared, hid or moved used to start a full re-scan of every window: a stall on the main
+	// thread every time a popup opened. Only the foreground change is still needed (who is in front).
+	if (event != EVENT_SYSTEM_FOREGROUND && hwnd) {
+		static const DWORD ownPid = GetCurrentProcessId();
+		DWORD pid = 0;
+		GetWindowThreadProcessId(hwnd, &pid);
+		if (pid == ownPid) return;
+	}
 	if (constructedTracker) constructedTracker->scheduleRefresh();
 }
 
@@ -134,7 +143,15 @@ bool WindowHandle::refresh(quintptr foreground) {
 	// Prefer the AppUserModelID (what the taskbar groups by); fall back to the exe name,
 	// which is what most desktop-entry style lookups expect.
 	auto appId = appUserModelId(h);
-	if (appId.isEmpty()) appId = packagedAppUserModelId(static_cast<DWORD>(this->mPid));
+	if (appId.isEmpty()) {
+		// OpenProcess + GetApplicationUserModelId on every refresh of every window was a good part of the
+		// stalls: the process' id is the same for its whole life.
+		if (!this->mPackagedIdKnown) {
+			this->mPackagedId = packagedAppUserModelId(static_cast<DWORD>(this->mPid));
+			this->mPackagedIdKnown = true;
+		}
+		appId = this->mPackagedId;
+	}
 	if (appId.isEmpty()) appId = QFileInfo(this->mExecutable).completeBaseName();
 	// File Explorer windows carry no id of their own; the Start menu (and the dock pin) knows
 	// Explorer by this one.
