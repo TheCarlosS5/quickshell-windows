@@ -6,7 +6,10 @@
 #include <qfileinfo.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
+#include <qdatetime.h>
+#include <qhash.h>
 #include <qset.h>
+#include <qtimezone.h>
 
 #include "logcat.hpp"
 #include "scan.hpp"
@@ -16,9 +19,10 @@ namespace qs::core {
 namespace {
 QS_LOGGING_CATEGORY(logQmlTree, "quickshell.qmltree", QtInfoMsg);
 
-bool sameFile(const QFileInfo& a, const QFileInfo& b) {
-	return b.exists() && a.size() == b.size() && a.lastModified() == b.lastModified();
-}
+struct FileStamp {
+	qint64 size = -1;
+	QDateTime modified;
+};
 
 // Copies keeping the modification time (it is what Qt's compiled cache checks).
 bool copyFile(const QString& from, const QString& to) {
@@ -61,16 +65,30 @@ QString materializeQmlTree(const QDir& configRoot, const QmlScanner& scanner, co
 	int copied = 0;
 	int written = 0;
 
+	// What the mirror holds now, from one listing: sizes and times come with the directory listing, so no file
+	// is asked on its own (that was ~1,000 extra file lookups at every start, seconds on a slow disk).
+	QHash<QString, FileStamp> present;
+	{
+		QDirIterator listing(mirror.path(), QDir::Files | QDir::Hidden | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+		while (listing.hasNext()) {
+			auto info = listing.nextFileInfo();
+			present.insert(mirror.relativeFilePath(info.filePath()), {info.size(), info.lastModified(QTimeZone::UTC)});
+		}
+	}
+
 	// Every file of the config (QML, scripts, assets referenced by relative URLs).
 	QDirIterator it(rootPath, QDir::Files | QDir::Hidden | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
 	while (it.hasNext()) {
-		auto source = QFileInfo(it.next());
+		auto source = it.nextFileInfo();
 		auto rel = relative(source.absoluteFilePath());
 		if (rel.startsWith(".git/") || rel.endsWith(".qmlc") || rel == ".qmlls.ini") continue;
 		if (scanner.fileIntercepts.contains(source.absoluteFilePath())) continue; // written below
 		expected.insert(rel);
 		auto target = mirror.filePath(rel);
-		if (sameFile(source, QFileInfo(target))) continue;
+		auto stamp = present.constFind(rel);
+		if (stamp != present.constEnd() && stamp->size == source.size()
+		    && stamp->modified == source.lastModified(QTimeZone::UTC))
+			continue;
 		QDir().mkpath(QFileInfo(target).absolutePath());
 		if (!copyFile(source.absoluteFilePath(), target)) {
 			qCWarning(logQmlTree) << "Could not copy" << rel;
@@ -87,9 +105,12 @@ QString materializeQmlTree(const QDir& configRoot, const QmlScanner& scanner, co
 		auto target = mirror.filePath(rel);
 		QDir().mkpath(QFileInfo(target).absolutePath());
 		auto data = content.toUtf8();
-		QFile existing(target);
-		auto changed = !existing.open(QFile::ReadOnly) || existing.readAll() != data;
-		existing.close();
+		auto stamp = present.constFind(rel);
+		auto changed = stamp == present.constEnd() || stamp->size != data.size();
+		if (!changed) { // same size: only then is the content worth reading
+			QFile existing(target);
+			changed = !existing.open(QFile::ReadOnly) || existing.readAll() != data;
+		}
 		if (changed) {
 			if (!writeIfChanged(target, data)) {
 				qCWarning(logQmlTree) << "Could not write" << rel;
@@ -101,11 +122,9 @@ QString materializeQmlTree(const QDir& configRoot, const QmlScanner& scanner, co
 
 	// Files removed from the config leave the mirror too.
 	int removed = 0;
-	QDirIterator stale(mirror.path(), QDir::Files | QDir::Hidden | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
-	while (stale.hasNext()) {
-		auto path = stale.next();
-		if (!expected.contains(mirror.relativeFilePath(path))) {
-			QFile::remove(path);
+	for (auto [rel, stamp]: present.asKeyValueRange()) {
+		if (!expected.contains(rel)) {
+			QFile::remove(mirror.filePath(rel));
 			++removed;
 		}
 	}
