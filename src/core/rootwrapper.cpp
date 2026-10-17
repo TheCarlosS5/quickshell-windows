@@ -4,6 +4,8 @@
 
 #include <qcoreapplication.h>
 #include <qdir.h>
+#include <qdiriterator.h>
+#include <qelapsedtimer.h>
 #include <qfileinfo.h>
 #include <qfilesystemwatcher.h>
 #include <qlogging.h>
@@ -127,6 +129,29 @@ void RootWrapper::reloadGraph(bool hard) {
 		url.setPath("@/qs/" % rootFile.fileName());
 	}
 	auto component = QQmlComponent(generation->engine, url);
+
+	// QS_PRECOMPILE=1: compile every QML file of the config into Qt's disk cache and quit, without creating
+	// anything. An installer runs this once, so the first real start does not spend its first seconds (half a
+	// minute on a slow PC) compiling ~600 files. The tree path is the same one the real start uses, and so are
+	// the cache entries.
+	if (qEnvironmentVariableIsSet("QS_PRECOMPILE") && !treeRoot.isEmpty()) {
+		QElapsedTimer timer;
+		timer.start();
+		auto compiled = 0;
+		auto failed = 0;
+		QDirIterator it(QDir(treeRoot).filePath("qs"), {"*.qml"}, QDir::Files, QDirIterator::Subdirectories);
+		while (it.hasNext()) {
+			auto file = QQmlComponent(generation->engine, QUrl::fromLocalFile(it.next()));
+			if (file.isError()) failed++;
+			else compiled++;
+		}
+		qInfo() << "Precompiled" << compiled << "QML files (" << failed << "not on their own) in"
+		        << timer.elapsed() << "ms";
+		QCoreApplication::processEvents();
+		QThread::msleep(300);
+		QCoreApplication::processEvents();
+		std::exit(component.isReady() ? 0 : 1); // NOLINT
+	}
 
 	if (!component.isReady()) {
 		qCritical() << "Failed to load configuration";
