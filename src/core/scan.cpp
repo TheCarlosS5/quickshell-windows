@@ -283,15 +283,19 @@ bool QmlScanner::scanQmlFile(const QString& path, bool& singleton, bool& interna
 		statTimer.start();
 		auto pathInfo = QFileInfo(ipath);
 		auto cpath = pathInfo.absoluteFilePath();
-		auto pathExists = pathInfo.exists();
+		auto kind = this->importKinds.value(cpath, -1);
+		if (kind == -1) {
+			kind = !pathInfo.exists() ? 0 : pathInfo.isDir() ? 2 : 1;
+			this->importKinds.insert(cpath, kind);
+		}
 		statNs += statTimer.nsecsElapsed();
 
-		if (!pathExists) {
+		if (kind == 0) {
 			qCWarning(logQmlScanner) << "Ignoring unresolvable import" << ipath << "from" << path;
 			continue;
 		}
 
-		if (!pathInfo.isDir()) {
+		if (kind != 2) {
 			qCDebug(logQmlScanner) << "Ignoring non-directory import" << ipath << "from" << path;
 			continue;
 		}

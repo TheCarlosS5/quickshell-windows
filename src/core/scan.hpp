@@ -27,6 +27,9 @@ public:
 	QSet<QString> scannedDirs;
 	QVector<QString> scannedFiles;
 	QHash<QString, QByteArray> fileHashes;
+	// What each import path is (0 missing, 1 file, 2 folder): ~600 files import the same few folders,
+	// and each lookup is a file system call.
+	QHash<QString, char> importKinds;
 	QHash<QString, QString> fileIntercepts;
 
 	struct ScanError {
