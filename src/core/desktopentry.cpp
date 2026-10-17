@@ -424,6 +424,17 @@ DesktopEntryManager::DesktopEntryManager(): monitor(new DesktopEntryMonitor(this
 #endif
 }
 
+// Scans run on their own thread: walking the Start menu can take seconds on a slow PC, and the global pool also
+// reads config files and quantizes wallpaper colours (with the UI thread waiting for it).
+static QThreadPool* scanPool() {
+	static auto* pool = [] {
+		auto* p = new QThreadPool(); // NOLINT
+		p->setMaxThreadCount(1);
+		return p;
+	}();
+	return pool;
+}
+
 void DesktopEntryManager::scanDesktopEntries() {
 	qCDebug(logDesktopEntry) << "Starting desktop entry scan";
 
@@ -436,7 +447,7 @@ void DesktopEntryManager::scanDesktopEntries() {
 	this->scanInProgress = true;
 	this->scanQueued = false;
 	auto* scanner = new DesktopEntryScanner(this);
-	QThreadPool::globalInstance()->start(scanner);
+	scanPool()->start(scanner);
 }
 
 DesktopEntryManager* DesktopEntryManager::instance() {
@@ -487,7 +498,7 @@ void DesktopEntryManager::handleFileChanges() {
 	this->scanInProgress = true;
 	this->scanQueued = false;
 	auto* scanner = new DesktopEntryScanner(this);
-	QThreadPool::globalInstance()->start(scanner);
+	scanPool()->start(scanner);
 }
 
 const QStringList& DesktopEntryManager::desktopPaths() {

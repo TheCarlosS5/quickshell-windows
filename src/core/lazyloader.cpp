@@ -194,7 +194,10 @@ void LazyLoader::onIncubationFailed() {
 		qWarning() << error;
 	}
 
-	delete this->incubator;
+	// Later, and the pointer cleared: this runs inside the incubator's own status callback, and a loader that kept
+	// the freed pointer still looked busy (anything reading `item` used freed memory).
+	this->incubator->deleteLater();
+	this->incubator = nullptr;
 	this->targetLoading = false;
 	emit this->loadingChanged();
 }

@@ -22,7 +22,11 @@ QS_LOGGING_CATEGORY(logQmlTree, "quickshell.qmltree", QtInfoMsg);
 struct FileStamp {
 	qint64 size = -1;
 	QDateTime modified;
+	QString rel; // as spelled on disk
 };
+
+// Windows file names ignore case: Foo.qml renamed to foo.qml is the same file.
+QString key(const QString& rel) { return rel.toLower(); }
 
 // Copies keeping the modification time (it is what Qt's compiled cache checks).
 bool copyFile(const QString& from, const QString& to) {
@@ -72,7 +76,8 @@ QString materializeQmlTree(const QDir& configRoot, const QmlScanner& scanner, co
 		QDirIterator listing(mirror.path(), QDir::Files | QDir::Hidden | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
 		while (listing.hasNext()) {
 			auto info = listing.nextFileInfo();
-			present.insert(mirror.relativeFilePath(info.filePath()), {info.size(), info.lastModified(QTimeZone::UTC)});
+			auto rel = mirror.relativeFilePath(info.filePath());
+			present.insert(key(rel), {info.size(), info.lastModified(QTimeZone::UTC), rel});
 		}
 	}
 
@@ -83,10 +88,10 @@ QString materializeQmlTree(const QDir& configRoot, const QmlScanner& scanner, co
 		auto rel = relative(source.absoluteFilePath());
 		if (rel.startsWith(".git/") || rel.endsWith(".qmlc") || rel == ".qmlls.ini") continue;
 		if (scanner.fileIntercepts.contains(source.absoluteFilePath())) continue; // written below
-		expected.insert(rel);
+		expected.insert(key(rel));
 		auto target = mirror.filePath(rel);
-		auto stamp = present.constFind(rel);
-		if (stamp != present.constEnd() && stamp->size == source.size()
+		auto stamp = present.constFind(key(rel));
+		if (stamp != present.constEnd() && stamp->rel == rel && stamp->size == source.size()
 		    && stamp->modified == source.lastModified(QTimeZone::UTC))
 			continue;
 		QDir().mkpath(QFileInfo(target).absolutePath());
@@ -101,11 +106,11 @@ QString materializeQmlTree(const QDir& configRoot, const QmlScanner& scanner, co
 	for (auto [path, content]: scanner.fileIntercepts.asKeyValueRange()) {
 		if (!QFileInfo(path).absoluteFilePath().startsWith(rootPath)) continue;
 		auto rel = relative(path);
-		expected.insert(rel);
+		expected.insert(key(rel));
 		auto target = mirror.filePath(rel);
 		QDir().mkpath(QFileInfo(target).absolutePath());
 		auto data = content.toUtf8();
-		auto stamp = present.constFind(rel);
+		auto stamp = present.constFind(key(rel));
 		auto changed = stamp == present.constEnd() || stamp->size != data.size();
 		if (!changed) { // same size: only then is the content worth reading
 			QFile existing(target);
@@ -122,9 +127,9 @@ QString materializeQmlTree(const QDir& configRoot, const QmlScanner& scanner, co
 
 	// Files removed from the config leave the mirror too.
 	int removed = 0;
-	for (auto [rel, stamp]: present.asKeyValueRange()) {
-		if (!expected.contains(rel)) {
-			QFile::remove(mirror.filePath(rel));
+	for (auto [name, stamp]: present.asKeyValueRange()) {
+		if (!expected.contains(name)) {
+			QFile::remove(mirror.filePath(stamp.rel));
 			++removed;
 		}
 	}
