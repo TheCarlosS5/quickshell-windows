@@ -8,6 +8,7 @@
 #include <qobject.h>
 #include <qqmlintegration.h>
 #include <qqmllist.h>
+#include <qscopeguard.h>
 #include <qtmetamacros.h>
 #include <qtypes.h>
 #include <qvariant.h>
@@ -90,7 +91,7 @@ public:
 		this->mValuesList.insert(iindex, object);
 		this->endInsertRows();
 
-		emit this->valuesChanged();
+		this->notifyValuesChanged();
 		emit this->objectInsertedPost(object, iindex);
 	}
 
@@ -124,12 +125,23 @@ public:
 		this->mValuesList.removeAt(index);
 		this->endRemoveRows();
 
-		emit this->valuesChanged();
+		this->notifyValuesChanged();
 		emit this->objectRemovedPost(object, index);
 	}
 
 	// Assumes only one instance of a specific value
 	void diffUpdate(const QList<T*>& newValues) {
+		// One valuesChanged for the whole update, not one per row: bindings on `values` (the app
+		// list, for example) re-ran once per inserted object, ~200 times while the shell started.
+		this->mBatching = true;
+		auto batch = qScopeGuard([this] {
+			this->mBatching = false;
+			if (this->mBatchDirty) {
+				this->mBatchDirty = false;
+				emit this->valuesChanged();
+			}
+		});
+
 		for (qsizetype i = 0; i < this->mValuesList.length();) {
 			if (newValues.contains(this->mValuesList.at(i))) i++;
 			else this->removeAt(i);
@@ -174,5 +186,12 @@ public:
 	}
 
 private:
+	void notifyValuesChanged() {
+		if (this->mBatching) this->mBatchDirty = true;
+		else emit this->valuesChanged();
+	}
+
 	QList<T*> mValuesList;
+	bool mBatching = false;
+	bool mBatchDirty = false;
 };

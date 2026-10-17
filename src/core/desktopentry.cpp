@@ -415,7 +415,13 @@ DesktopEntryManager::DesktopEntryManager(): monitor(new DesktopEntryMonitor(this
 	    &DesktopEntryManager::handleFileChanges
 	);
 
+#ifdef Q_OS_WIN
+	// Walking the Start menu (COM, icons) took seconds on the UI thread of a slow PC, in front of everything
+	// else at start: on Windows the first scan runs in the background too, and the list fills a moment later.
+	this->scanDesktopEntries();
+#else
 	DesktopEntryScanner(this).run();
+#endif
 }
 
 void DesktopEntryManager::scanDesktopEntries() {
@@ -584,6 +590,12 @@ void DesktopEntryManager::onScanCompleted(const QList<ParsedDesktopEntryData>& s
 	auto newApplications = QVector<DesktopEntry*>();
 	for (auto* entry: this->desktopEntries.values())
 		if (!entry->bNoDisplay) newApplications.append(entry);
+
+	// A stable order: QHash order changes from scan to scan, and every rescan then moved every row
+	// (and re-ran every binding on the list) even when no app had changed.
+	std::ranges::sort(newApplications, [](const DesktopEntry* a, const DesktopEntry* b) {
+		return a->mId < b->mId;
+	});
 
 	this->mApplications.diffUpdate(newApplications);
 

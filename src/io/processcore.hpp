@@ -11,6 +11,10 @@
 
 namespace qs::io::process {
 
+// Logs a process start under quickshell.process.start (off by default; the start-up cost of every process
+// counts on a slow PC, this shows which ones a config starts).
+void logStart(const QString& program, const QList<QString>& args, bool detached);
+
 class ProcessContext {
 	Q_PROPERTY(QList<QString> command MEMBER command WRITE setCommand);
 	Q_PROPERTY(QVariantHash environment MEMBER environment WRITE setEnvironment);
