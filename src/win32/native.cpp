@@ -31,6 +31,23 @@ HWND toHwnd(quintptr h) { return reinterpret_cast<HWND>(h); } // NOLINT
 
 QRect toQRect(const RECT& r) { return QRect(QPoint(r.left, r.top), QPoint(r.right - 1, r.bottom - 1)); }
 
+// The welcome cover ii-host shows on the screen of `window` while the shell starts (window class
+// IiSplash, host/src/splash.cpp), or null. The host puts it up before it starts the shell, so the
+// first look that finds none ends the search for good: later window moves cost nothing.
+HWND welcomeCoverFor(HWND window) {
+	static bool done = false;
+	if (done) return nullptr;
+	auto* monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+	HWND any = nullptr;
+	for (HWND h = FindWindowExW(nullptr, nullptr, L"IiSplash", nullptr); h; h = FindWindowExW(nullptr, h, L"IiSplash", nullptr)) {
+		if (!IsWindowVisible(h)) continue;
+		if (MonitorFromWindow(h, MONITOR_DEFAULTTONULL) == monitor) return h;
+		if (!any) any = h;
+	}
+	if (!any) done = true;
+	return any;
+}
+
 } // namespace
 
 quintptr hwnd(QWindow* window) {
@@ -821,6 +838,18 @@ bool NativeEventRouter::nativeEventFilter(
 	// only our own restacking (an explicit window to insert after) moves them.
 	if (msg->message == WM_WINDOWPOSCHANGING) {
 		auto* pos = reinterpret_cast<WINDOWPOS*>(msg->lParam); // NOLINT
+		// ii-host's welcome cover stays above everything the shell shows while it loads: a bar or dock
+		// raised to the top (restack, a new window shown) goes right under the cover instead of
+		// flashing above it until the cover raised itself again.
+		auto topmost = (GetWindowLongW(msg->hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) || pos->hwndInsertAfter == HWND_TOPMOST;
+		if (topmost && (!(pos->flags & SWP_NOZORDER) || (pos->flags & SWP_SHOWWINDOW)) && pos->hwndInsertAfter != HWND_BOTTOM
+		    && pos->hwndInsertAfter != HWND_NOTOPMOST && GetParent(msg->hwnd) == nullptr)
+		{
+			if (auto* cover = welcomeCoverFor(msg->hwnd)) {
+				pos->hwndInsertAfter = cover;
+				pos->flags &= ~SWP_NOZORDER;
+			}
+		}
 		if (!(pos->flags & SWP_NOZORDER) && pos->hwndInsertAfter == HWND_TOP
 		    && !(GetWindowLongW(msg->hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)
 		    && LayerManager::instance()->isDesktopLayer(reinterpret_cast<quintptr>(msg->hwnd)))
