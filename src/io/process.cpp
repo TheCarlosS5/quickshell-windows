@@ -215,6 +215,7 @@ void Process::startProcessIfReady() {
 	if (!this->mStdinEnabled) this->process->closeWriteChannel();
 
 	this->setupEnvironment(this->process);
+	qs::io::process::logStart(cmd, args, false);
 	this->process->start(cmd, args);
 }
 
@@ -256,6 +257,7 @@ void Process::startDetached() {
 	process.setStandardOutputFile(QProcess::nullDevice());
 	process.setStandardErrorFile(QProcess::nullDevice());
 
+	qs::io::process::logStart(cmd, args, true);
 	process.startDetached();
 }
 

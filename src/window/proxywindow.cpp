@@ -15,6 +15,7 @@
 #include <qqmlinfo.h>
 #include <qqmllist.h>
 #include <qquickgraphicsconfiguration.h>
+#include <qquickgraphicsdevice.h>
 #include <qquickitem.h>
 #include <qquickwindow.h>
 #include <qregion.h>
@@ -32,6 +33,31 @@
 #include "../core/reload.hpp"
 #include "../debug/lint.hpp"
 #include "windowinterface.hpp"
+
+#ifdef Q_OS_WIN
+#include <rhi/qrhi.h>
+#endif
+
+namespace {
+
+#ifdef Q_OS_WIN
+// QS_SHARED_RHI=1 (Windows, basic render loop): every window renders through one Direct3D 11 device instead of one
+// device each (measured with ii: ~30 MB less). Experimental and off: Qt does not recreate a device the application
+// gave it, so after a GPU reset (a driver update, some laptops on resume) every window would stay blank.
+QRhi* sharedRhi() {
+	static QRhi* rhi = []() -> QRhi* {
+		if (qEnvironmentVariableIntValue("QS_SHARED_RHI") != 1) return nullptr;
+		if (qEnvironmentVariable("QSG_RENDER_LOOP", "basic") != "basic") return nullptr; // one thread only
+		QRhiD3D11InitParams params;
+		auto* created = QRhi::create(QRhi::D3D11, &params);
+		if (!created) qWarning() << "QS_SHARED_RHI: could not create the shared Direct3D 11 device";
+		return created;
+	}();
+	return rhi;
+}
+#endif
+
+} // namespace
 
 ProxyWindowBase::ProxyWindowBase(QObject* parent)
     : Reloadable(parent)
@@ -155,6 +181,18 @@ void ProxyWindowBase::ensureQWindow() {
 	this->window = nullptr; // createQQuickWindow may indirectly reference this->window
 	this->window = this->createQQuickWindow();
 	this->window->setFormat(format);
+
+	// QS_RELEASE_HIDDEN=1: a hidden window gives back its graphics resources (swap chain, textures, scene graph) and
+	// builds them again when shown: less memory for panels opened once in a while, a slower first frame each time.
+#ifdef Q_OS_WIN
+	if (auto* rhi = sharedRhi()) this->window->setGraphicsDevice(QQuickGraphicsDevice::fromRhi(rhi));
+#endif
+
+	static const bool releaseHidden = qEnvironmentVariableIntValue("QS_RELEASE_HIDDEN") == 1;
+	if (releaseHidden) {
+		this->window->setPersistentGraphics(false);
+		this->window->setPersistentSceneGraph(false);
+	}
 
 	// needed for vulkan dmabuf import, qt ignores these if not applicable
 	auto graphicsConfig = this->window->graphicsConfiguration();

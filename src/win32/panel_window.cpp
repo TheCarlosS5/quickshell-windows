@@ -1,4 +1,5 @@
 #include "panel_window.hpp"
+#include <algorithm>
 #include <map>
 
 #include <qlist.h>
@@ -36,7 +37,11 @@ public:
 	void addPanel(WinPanelWindow* panel) {
 		panel->knownGeneration = EngineGeneration::findObjectGeneration(panel);
 		auto& panels = this->mPanels[panel->knownGeneration];
-		if (!panels.contains(panel)) panels.push_back(panel);
+		if (panels.contains(panel)) return;
+		auto at = std::find_if(panels.begin(), panels.end(), [&](WinPanelWindow* other) {
+			return other->creationOrder > panel->creationOrder;
+		});
+		panels.insert(at, panel);
 	}
 
 	void removePanel(WinPanelWindow* panel) {
@@ -54,12 +59,12 @@ public:
 		}
 	}
 
+	// Every other panel: those shown later sit inside its zone, and side panels shown before it fit
+	// between the bars (WinPanelWindow::updateDimensions).
 	void updateLowerDimensions(WinPanelWindow* exclude) {
 		if (!exclude->knownGeneration) return;
-		auto found = false;
 		for (auto* panel: this->mPanels[exclude->knownGeneration]) {
-			if (panel == exclude) found = true;
-			else if (found) panel->updateDimensions(false);
+			if (panel != exclude) panel->updateDimensions(false);
 		}
 	}
 
@@ -68,6 +73,8 @@ private:
 };
 
 WinPanelWindow::WinPanelWindow(QObject* parent): ProxyWindowBase(parent) {
+	static quint64 created = 0;
+	this->creationOrder = ++created;
 	this->bcExclusiveZone.setBinding([this]() -> qint32 {
 		switch (this->bExclusionMode.value()) {
 		case ExclusionMode::Ignore: return 0;
@@ -231,14 +238,27 @@ void WinPanelWindow::updateDimensions(bool propagate) {
 	auto screenGeometry = this->mTrackedScreen->geometry();
 
 	if (this->bExclusionMode != ExclusionMode::Ignore) {
+		// Like layer-shell, exclusive zones apply across layers (the bar pushes the overview and
+		// sidebars down too); panels opt out with ExclusionMode.Ignore. Panels shown later sit inside
+		// the zones of the ones shown before, with one exception that keeps the order from mattering:
+		// a bar along the top or bottom always spans the whole edge, and a panel along the left or
+		// right (a dock there) fits between such bars, whichever was shown first.
+		auto ownEdge = this->bcExclusionEdge.value();
+		auto ownSide = ownEdge == Qt::LeftEdge || ownEdge == Qt::RightEdge;
+		auto ownBar = ownEdge == Qt::TopEdge || ownEdge == Qt::BottomEdge;
+		auto later = false;
 		for (auto* panel: WinPanelStack::instance()->panels(this)) {
-			if (panel == this) break;
-			// Like layer-shell, exclusive zones apply across layers (the bar pushes the
-			// overview and sidebars down too); panels opt out with ExclusionMode.Ignore.
+			if (panel == this) {
+				later = true;
+				continue;
+			}
 			if (panel->mTrackedScreen != this->mTrackedScreen) continue;
 
 			auto edge = panel->bcExclusionEdge.value();
 			auto exclusiveZone = panel->bcExclusiveZone.value();
+			auto side = edge == Qt::LeftEdge || edge == Qt::RightEdge;
+			auto bar = edge == Qt::TopEdge || edge == Qt::BottomEdge;
+			if (later ? !(ownSide && bar) : (ownBar && side)) continue;
 
 			screenGeometry.adjust(
 			    edge == Qt::LeftEdge ? exclusiveZone : 0,

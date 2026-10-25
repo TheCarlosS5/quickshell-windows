@@ -1,5 +1,6 @@
 #include "notifications.hpp"
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <set>
@@ -61,6 +62,16 @@ constexpr ULONG_PTR COPYDATA_NOTIFICATION = 0x49490010;
 // Health report to ii-host (host/src/health.cpp, protocol version 1).
 constexpr ULONG_PTR COPYDATA_SERVICE_STATE = 0x49490020;
 constexpr int POLL_MS = 1000;
+// Each read asks Windows for every toast it keeps and parses each one: ~15 ms of CPU here, several times that on a
+// slow PC, every second. With nobody at the keyboard or mouse for a minute (away, or watching a video) nobody sees a
+// banner a few seconds late either: then the toasts are read every 5 s (the health report stays every second).
+constexpr DWORD IDLE_AFTER_MS = 60000;
+constexpr auto IDLE_READ_INTERVAL = std::chrono::milliseconds(5000);
+
+bool userIdle() {
+	LASTINPUTINFO info {sizeof(info), 0};
+	return GetLastInputInfo(&info) && GetTickCount() - info.dwTime > IDLE_AFTER_MS;
+}
 
 QString toQ(const winrt::hstring& s) { return QString::fromWCharArray(s.c_str(), static_cast<qsizetype>(s.size())); }
 
@@ -237,6 +248,8 @@ private:
 
 			std::set<quint32> known;
 			auto first = true;
+			auto lastRead = std::chrono::steady_clock::time_point();
+			auto lastReadOk = true;
 			auto announcedDenied = false;
 			auto announcedReading = false;
 			while (true) {
@@ -271,6 +284,17 @@ private:
 					std::scoped_lock lock(this->mutex);
 					removals.swap(this->pendingRemovals);
 				}
+				if (!first && removals.empty() && userIdle()
+				    && std::chrono::steady_clock::now() - lastRead < IDLE_READ_INTERVAL)
+				{
+					this->reportHealth(lastReadOk ? "available" : "error", "granted", lastReadOk);
+					std::unique_lock lock(this->mutex);
+					this->wake.wait_for(lock, std::chrono::milliseconds(POLL_MS), [this]() {
+						return !this->pendingRemovals.empty();
+					});
+					continue;
+				}
+				lastRead = std::chrono::steady_clock::now();
 				for (auto id: removals) {
 					try {
 						listener.RemoveNotification(id);
@@ -296,6 +320,7 @@ private:
 
 				// Reported after the read, so a loop that is stuck in it stops reporting.
 				this->reportHealth(pollOk ? "available" : "error", "granted", pollOk);
+				lastReadOk = pollOk;
 
 				for (auto id: known) {
 					if (!current.contains(id)) QMetaObject::invokeMethod(this, [this, id]() { this->toastRemoved(id); });

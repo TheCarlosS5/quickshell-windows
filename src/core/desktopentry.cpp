@@ -415,7 +415,24 @@ DesktopEntryManager::DesktopEntryManager(): monitor(new DesktopEntryMonitor(this
 	    &DesktopEntryManager::handleFileChanges
 	);
 
+#ifdef Q_OS_WIN
+	// Walking the Start menu (COM, icons) took seconds on the UI thread of a slow PC, in front of everything
+	// else at start: on Windows the first scan runs in the background too, and the list fills a moment later.
+	this->scanDesktopEntries();
+#else
 	DesktopEntryScanner(this).run();
+#endif
+}
+
+// Scans run on their own thread: walking the Start menu can take seconds on a slow PC, and the global pool also
+// reads config files and quantizes wallpaper colours (with the UI thread waiting for it).
+static QThreadPool* scanPool() {
+	static auto* pool = [] {
+		auto* p = new QThreadPool(); // NOLINT
+		p->setMaxThreadCount(1);
+		return p;
+	}();
+	return pool;
 }
 
 void DesktopEntryManager::scanDesktopEntries() {
@@ -430,7 +447,7 @@ void DesktopEntryManager::scanDesktopEntries() {
 	this->scanInProgress = true;
 	this->scanQueued = false;
 	auto* scanner = new DesktopEntryScanner(this);
-	QThreadPool::globalInstance()->start(scanner);
+	scanPool()->start(scanner);
 }
 
 DesktopEntryManager* DesktopEntryManager::instance() {
@@ -481,7 +498,7 @@ void DesktopEntryManager::handleFileChanges() {
 	this->scanInProgress = true;
 	this->scanQueued = false;
 	auto* scanner = new DesktopEntryScanner(this);
-	QThreadPool::globalInstance()->start(scanner);
+	scanPool()->start(scanner);
 }
 
 const QStringList& DesktopEntryManager::desktopPaths() {
@@ -584,6 +601,12 @@ void DesktopEntryManager::onScanCompleted(const QList<ParsedDesktopEntryData>& s
 	auto newApplications = QVector<DesktopEntry*>();
 	for (auto* entry: this->desktopEntries.values())
 		if (!entry->bNoDisplay) newApplications.append(entry);
+
+	// A stable order: QHash order changes from scan to scan, and every rescan then moved every row
+	// (and re-ran every binding on the list) even when no app had changed.
+	std::ranges::sort(newApplications, [](const DesktopEntry* a, const DesktopEntry* b) {
+		return a->mId < b->mId;
+	});
 
 	this->mApplications.diffUpdate(newApplications);
 

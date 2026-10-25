@@ -88,6 +88,8 @@ private:
 	quintptr mHwnd;
 	qint64 mPid = 0;
 	QString mExecutable;
+	QString mPackagedId; // the process' AppUserModelID: it never changes, asked once
+	bool mPackagedIdKnown = false;
 	QString mAppId;
 	QString mTitle;
 	bool mActivated = false;

@@ -672,22 +672,24 @@ void SystemTrayItem::send(quint32 mouseMessage) const {
 }
 
 void SystemTrayItem::activate() {
-	// The shell just got the click, so it may hand the foreground to the app it opens.
-	AllowSetForegroundWindow(this->pid ? this->pid : ASFW_ANY);
+	// The shell just got the click, so it may hand the foreground to the app it opens. Anyone, not only the
+	// process that owns the icon: many apps show their window from another process (Wallpaper Engine's tray
+	// icon belongs to its engine, the window is its UI process), and Windows keeps those in the background.
+	AllowSetForegroundWindow(ASFW_ANY);
 	this->send(WM_LBUTTONDOWN);
 	this->send(WM_LBUTTONUP);
 	if (this->version >= 4) this->send(NIN_SELECT);
 }
 
 void SystemTrayItem::secondaryActivate() {
-	AllowSetForegroundWindow(this->pid ? this->pid : ASFW_ANY);
+	AllowSetForegroundWindow(ASFW_ANY);
 	this->send(WM_LBUTTONDBLCLK);
 	this->send(WM_LBUTTONUP);
 }
 
 void SystemTrayItem::display(QObject* /*parentWindow*/, qint32 /*relativeX*/, qint32 /*relativeY*/) {
 	// Apps place the menu at the cursor, which is on the shell's icon.
-	AllowSetForegroundWindow(this->pid ? this->pid : ASFW_ANY);
+	AllowSetForegroundWindow(ASFW_ANY);
 	this->send(WM_RBUTTONDOWN);
 	this->send(WM_RBUTTONUP);
 	if (this->version >= 4) this->send(WM_CONTEXTMENU);

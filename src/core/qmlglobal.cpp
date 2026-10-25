@@ -328,6 +328,7 @@ void QuickshellGlobal::execDetached(const qs::io::process::ProcessContext& conte
 		process.setStandardErrorFile(QProcess::nullDevice());
 	}
 
+	qs::io::process::logStart(cmd, args, true);
 	process.startDetached();
 }
 

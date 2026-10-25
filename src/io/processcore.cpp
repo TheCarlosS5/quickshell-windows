@@ -6,8 +6,17 @@
 #include <qvariant.h>
 
 #include "../core/common.hpp"
+#include "../core/logcat.hpp"
 
 namespace qs::io::process {
+
+namespace {
+QS_LOGGING_CATEGORY(logProcessStart, "quickshell.process.start", QtWarningMsg);
+}
+
+void logStart(const QString& program, const QList<QString>& args, bool detached) {
+	qCInfo(logProcessStart).noquote() << (detached ? "detached:" : "process:") << program << args.join(' ');
+}
 
 void setupProcessEnvironment(
     QProcess* process,

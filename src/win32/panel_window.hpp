@@ -105,6 +105,9 @@ private:
 
 	QPointer<QScreen> mTrackedScreen = nullptr;
 	EngineGeneration* knownGeneration = nullptr;
+	// Creation order: the stack of exclusive zones follows it, not the order windows were last shown
+	// (a bar moved to the bottom used to end up above a dock created after it).
+	quint64 creationOrder = 0;
 	std::unique_ptr<AppBar> appBar;
 	std::optional<Layer> mLayer;
 	bool mYieldsToFullscreen = false;
