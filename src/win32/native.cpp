@@ -52,6 +52,13 @@ void applyShellWindowStyle(QWindow* window, bool focusable) {
 	auto h = toHwnd(hwnd(window));
 	if (!h) return;
 
+	// A panel that does not take the keyboard never becomes the active window, not even when clicked: Wallpaper
+	// Engine and Lively pause the wallpaper whenever "another application" is in front, and a click on the bar, the
+	// dock or a widget counted as one. Not listed in Alt+Tab either (WS_EX_TOOLWINDOW, from Qt::Tool).
+	auto ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+	auto wanted = focusable ? (ex & ~static_cast<LONG_PTR>(WS_EX_NOACTIVATE)) : (ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW);
+	if (wanted != ex) SetWindowLongPtrW(h, GWL_EXSTYLE, wanted);
+
 	// Shell surfaces draw their own shape; no Win11 rounding, accent border or open/close animation.
 	DWORD corner = DWMWCP_DONOTROUND;
 	DwmSetWindowAttribute(h, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
