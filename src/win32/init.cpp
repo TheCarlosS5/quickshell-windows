@@ -1,4 +1,8 @@
+#include <algorithm>
+
 #include <qcoreapplication.h>
+#include <qevent.h>
+#include <qscreen.h>
 #include <qdir.h>
 #include <qguiapplication.h>
 #include <qtenvironmentvariables.h>
@@ -54,6 +58,43 @@ void startHeartbeat() {
 	timer->start();
 }
 
+// Ordinary windows (settings, store, welcome, dialogs) ask for a size in device-independent pixels: at 150 % a
+// 1100 x 750 window is taller than a 1080p screen's work area, Windows puts its title bar above the top edge and it
+// can no longer be moved. The first time such a window is shown it is shrunk to its monitor's work area (its minimum
+// size too, if that is what does not fit) and placed with its whole frame inside.
+class WindowFitter: public QObject {
+public:
+	bool eventFilter(QObject* object, QEvent* event) override {
+		if (event->type() != QEvent::Show || !object->isWindowType()) return false;
+		auto* window = static_cast<QWindow*>(object); // NOLINT
+		if (window->property("_qsFitted").toBool() || !window->isTopLevel() || window->property("_qs_shellSurface").toBool()) return false;
+		auto type = window->type();
+		if ((type != Qt::Window && type != Qt::Dialog) || window->flags().testFlag(Qt::FramelessWindowHint)) return false;
+		window->setProperty("_qsFitted", true);
+		auto* screen = window->screen();
+		if (!screen) return false;
+		const auto area = screen->availableGeometry();
+		const auto frame = window->frameMargins(); // known once the native window exists (it does at Show)
+		const int gap = 16;
+		const int maxW = area.width() - frame.left() - frame.right() - 2 * gap;
+		const int maxH = area.height() - frame.top() - frame.bottom() - 2 * gap;
+		if (maxW < 200 || maxH < 200) return false;
+		if (window->minimumWidth() > maxW || window->minimumHeight() > maxH) {
+			window->setMinimumSize(QSize(std::min(window->minimumWidth(), maxW), std::min(window->minimumHeight(), maxH)));
+		}
+		auto size = QSize(std::min(window->width(), maxW), std::min(window->height(), maxH));
+		if (size != window->size()) window->resize(size);
+		// The whole frame inside the work area; centred when it was not.
+		auto outer = QRect(window->x() - frame.left(), window->y() - frame.top(), size.width() + frame.left() + frame.right(),
+		                   size.height() + frame.top() + frame.bottom());
+		if (!area.contains(outer)) {
+			outer.moveCenter(area.center());
+			window->setPosition(outer.left() + frame.left(), outer.top() + frame.top());
+		}
+		return false;
+	}
+};
+
 class Win32Plugin: public QsEnginePlugin {
 	QList<QString> dependencies() override { return {"window"}; }
 
@@ -84,6 +125,7 @@ class Win32Plugin: public QsEnginePlugin {
 		qs::win32::NativeEventRouter::instance();
 
 		startHeartbeat();
+		QCoreApplication::instance()->installEventFilter(new WindowFitter()); // ordinary windows fit their screen
 
 		qs::win32::loadBundledFonts();
 		qs::win32::setupIconThemes();
