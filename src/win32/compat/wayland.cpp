@@ -94,12 +94,19 @@ ScreencopyView::ScreencopyView(QQuickItem* parent): QQuickItem(parent) {
 	});
 	QObject::connect(this, &QQuickItem::visibleChanged, this, &ScreencopyView::updateThumbnail);
 	QObject::connect(this, &QQuickItem::opacityChanged, this, &ScreencopyView::updateThumbnail);
-	// Moved or resized (a thumbnail flown across the screen, ii's minimize animation): at once, not at the next
-	// 33 ms poll or at the next frame of a window that may have nothing else to draw.
-	QObject::connect(this, &QQuickItem::xChanged, this, &ScreencopyView::updateThumbnail);
-	QObject::connect(this, &QQuickItem::yChanged, this, &ScreencopyView::updateThumbnail);
-	QObject::connect(this, &QQuickItem::widthChanged, this, &ScreencopyView::updateThumbnail);
-	QObject::connect(this, &QQuickItem::heightChanged, this, &ScreencopyView::updateThumbnail);
+	// Moved or resized: soon, not at the next 33 ms poll or at the next frame of a window that may have nothing
+	// else to draw. x, y, width and height often change together (a preview laid out, a thumbnail flown across the
+	// screen): one DWM update for all of them, once the current changes are done.
+	QObject::connect(this, &QQuickItem::xChanged, this, &ScreencopyView::scheduleThumbnailUpdate);
+	QObject::connect(this, &QQuickItem::yChanged, this, &ScreencopyView::scheduleThumbnailUpdate);
+	QObject::connect(this, &QQuickItem::widthChanged, this, &ScreencopyView::scheduleThumbnailUpdate);
+	QObject::connect(this, &QQuickItem::heightChanged, this, &ScreencopyView::scheduleThumbnailUpdate);
+}
+
+void ScreencopyView::scheduleThumbnailUpdate() {
+	if (this->mUpdateScheduled) return;
+	this->mUpdateScheduled = true;
+	QMetaObject::invokeMethod(this, &ScreencopyView::updateThumbnail, Qt::QueuedConnection);
 }
 
 ScreencopyView::~ScreencopyView() { this->unregisterThumbnail(); }
@@ -194,6 +201,7 @@ void ScreencopyView::unregisterThumbnail() {
 }
 
 void ScreencopyView::updateThumbnail() {
+	this->mUpdateScheduled = false;
 	if (!this->thumbnail || !this->trackedWindow) return;
 	auto* window = this->trackedWindow.data();
 

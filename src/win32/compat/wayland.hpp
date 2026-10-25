@@ -160,6 +160,7 @@ protected:
 
 private slots:
 	void updateThumbnail();
+	void scheduleThumbnailUpdate();
 
 private:
 	void registerThumbnail();
@@ -170,6 +171,7 @@ private:
 	QObject* mSource = nullptr;
 	bool mPaintCursor = false;
 	bool mLive = false;
+	bool mUpdateScheduled = false;
 	QSizeF mConstraint;
 	QSize mSourceSize;
 	quintptr thumbnail = 0;
