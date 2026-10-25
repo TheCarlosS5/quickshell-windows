@@ -14,6 +14,7 @@
 #include <qwindow.h>
 
 #include <windows.h>
+#include <dxgi.h>
 
 #include "../core/plugin.hpp"
 #include "../window/proxywindow.hpp"
@@ -22,6 +23,24 @@
 #include "panel_window.hpp"
 
 namespace {
+
+// The adapter Qt Quick draws with is Windows' software one (WARP, "Microsoft Basic Render Driver"): a virtual machine
+// or Windows Sandbox without a GPU driver.
+bool softwareAdapter() {
+	IDXGIFactory1* factory = nullptr;
+	if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory)))) return false; // NOLINT
+	auto software = false;
+	IDXGIAdapter1* adapter = nullptr;
+	if (SUCCEEDED(factory->EnumAdapters1(0, &adapter))) {
+		DXGI_ADAPTER_DESC1 desc {};
+		if (SUCCEEDED(adapter->GetDesc1(&desc))) {
+			software = (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0 || (desc.VendorId == 0x1414 && desc.DeviceId == 0x8c);
+		}
+		adapter->Release();
+	}
+	factory->Release();
+	return software;
+}
 
 // A graphics device that cannot be recreated (a driver reset under a heavy game) leaves a window that never draws
 // again. Ending the process lets ii-host start a fresh shell with new windows, instead of keeping broken ones.
@@ -101,11 +120,14 @@ class Win32Plugin: public QsEnginePlugin {
 	bool applies() override { return QGuiApplication::platformName() == "windows"; }
 
 	void init() override {
-		// Qt Quick's threaded render loop stops advancing animations in our layered,
-		// click-through shell windows until some input arrives (verified in Windows Sandbox:
-		// the overview stayed on its first frame until the mouse moved). The basic loop
-		// drives animations from the GUI thread and renders them reliably.
-		if (qEnvironmentVariableIsEmpty("QSG_RENDER_LOOP")) qputenv("QSG_RENDER_LOOP", "basic");
+		// Render loop (D9, plan 1.1). On Windows' software adapter Qt Quick's threaded loop stopped advancing
+		// animations in the shell's windows until some input arrived (seen in Windows Sandbox: the overview stayed on
+		// its first frame until the mouse moved), so there the basic loop drives them from the GUI thread. On a real
+		// GPU the threaded loop works (checked 2026-10-25: the overview, the window switcher and a sidebar sliding in
+		// with no input at all) and draws without waiting for the GUI thread, so a busy moment there no longer
+		// freezes what is on screen. QSG_RENDER_LOOP (ii-host sets it from config.json appearance.renderLoop) wins.
+		if (qEnvironmentVariableIsEmpty("QSG_RENDER_LOOP") && softwareAdapter()) qputenv("QSG_RENDER_LOOP", "basic");
+		qInfo() << "render loop:" << (qEnvironmentVariableIsEmpty("QSG_RENDER_LOOP") ? QByteArray("Qt's default") : qgetenv("QSG_RENDER_LOOP"));
 
 		// A shell is never the foreground app, so on battery Windows may throttle it as background
 		// work (EcoQoS: efficiency cores, low clocks): hovers and animations then stutter. Opt out.

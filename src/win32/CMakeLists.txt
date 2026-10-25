@@ -17,7 +17,7 @@ install_qml_module(quickshell-win32)
 add_library(quickshell-win32-init OBJECT init.cpp fonts.cpp)
 
 target_link_libraries(quickshell-win32 PUBLIC Qt::Quick Qt6::QuickPrivate dwmapi shell32 user32 ole32 propsys wtsapi32 shlwapi)
-target_link_libraries(quickshell-win32-init PRIVATE Qt::Quick Qt::Qml Qt6::QuickPrivate)
+target_link_libraries(quickshell-win32-init PRIVATE Qt::Quick Qt::Qml Qt6::QuickPrivate dxgi)
 
 qs_module_pch(quickshell-win32 SET large)
 
