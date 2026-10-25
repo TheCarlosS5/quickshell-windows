@@ -48,6 +48,7 @@ void WlrLayershell::setNamespace(QString ns) {
 	static const QStringList yielding = {"quickshell:notificationPopup", "quickshell:screenCorners"};
 	if (auto* panel = WinPanelWindow::forObject(this->target)) {
 		panel->setYieldsToFullscreen(yielding.contains(this->mNamespace));
+		panel->setNamespace(this->mNamespace);
 	}
 
 	emit this->namespaceChanged();

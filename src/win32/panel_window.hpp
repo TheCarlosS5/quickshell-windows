@@ -75,6 +75,9 @@ public:
 	[[nodiscard]] Layer layer() const;
 	void setLayer(Layer layer);
 	void setYieldsToFullscreen(bool yields);
+	// The layer-shell namespace ("quickshell:overview"), also a property of the native window named after it, so
+	// ii-host can tell which of the shell's windows is which (GetPropW).
+	void setNamespace(const QString& ns);
 
 	// Layer-shell keyboard focus: 0 none, 1 exclusive (grab while visible), 2 on demand.
 	void setKeyboardFocus(quint8 mode);
@@ -98,6 +101,7 @@ private:
 	void updateExclusion(bool propagate = true);
 	void updateExclusionCb() { this->updateExclusion(); }
 	void updateLayer();
+	void updateNamespaceMark();
 	void updateFocusable();
 	void updateKeyboardGrab();
 	void updateDimensions(bool propagate = true);
@@ -111,6 +115,8 @@ private:
 	std::unique_ptr<AppBar> appBar;
 	std::optional<Layer> mLayer;
 	bool mYieldsToFullscreen = false;
+	QString mNamespace;
+	QString mMarkedNamespace; // the property the native window has now
 	quint8 mKeyboardFocus = 0;
 
 	// clang-format off

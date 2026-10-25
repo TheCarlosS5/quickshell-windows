@@ -100,6 +100,8 @@ WinPanelWindow::WinPanelWindow(QObject* parent): ProxyWindowBase(parent) {
 
 WinPanelWindow::~WinPanelWindow() {
 	this->appBar.reset();
+	this->mNamespace.clear();
+	this->updateNamespaceMark(); // a window's properties are removed by whoever set them
 	WinPanelStack::instance()->removePanel(this);
 }
 
@@ -138,6 +140,8 @@ void WinPanelWindow::connectWindow() {
 	// existed, so lay the panel out now that it does.
 	this->updateDimensions();
 	this->updateLayer();
+	this->mMarkedNamespace.clear(); // a new native window has no properties yet
+	this->updateNamespaceMark();
 	this->updatePanelStack();
 }
 
@@ -176,6 +180,23 @@ void WinPanelWindow::setYieldsToFullscreen(bool yields) {
 	if (yields == this->mYieldsToFullscreen) return;
 	this->mYieldsToFullscreen = yields;
 	this->updateLayer();
+}
+
+void WinPanelWindow::setNamespace(const QString& ns) {
+	if (ns == this->mNamespace) return;
+	this->mNamespace = ns;
+	this->updateNamespaceMark();
+}
+
+void WinPanelWindow::updateNamespaceMark() {
+	auto h = this->window ? hwnd(this->window) : 0;
+	if (!h || this->mMarkedNamespace == this->mNamespace) return;
+	auto* window = reinterpret_cast<HWND>(h); // NOLINT
+	if (!this->mMarkedNamespace.isEmpty()) RemovePropW(window, reinterpret_cast<LPCWSTR>(this->mMarkedNamespace.utf16())); // NOLINT
+	this->mMarkedNamespace.clear();
+	if (!this->mNamespace.isEmpty() && SetPropW(window, reinterpret_cast<LPCWSTR>(this->mNamespace.utf16()), reinterpret_cast<HANDLE>(1))) { // NOLINT
+		this->mMarkedNamespace = this->mNamespace;
+	}
 }
 
 void WinPanelWindow::updateLayer() {
