@@ -94,6 +94,12 @@ ScreencopyView::ScreencopyView(QQuickItem* parent): QQuickItem(parent) {
 	});
 	QObject::connect(this, &QQuickItem::visibleChanged, this, &ScreencopyView::updateThumbnail);
 	QObject::connect(this, &QQuickItem::opacityChanged, this, &ScreencopyView::updateThumbnail);
+	// Moved or resized (a thumbnail flown across the screen, ii's minimize animation): at once, not at the next
+	// 33 ms poll or at the next frame of a window that may have nothing else to draw.
+	QObject::connect(this, &QQuickItem::xChanged, this, &ScreencopyView::updateThumbnail);
+	QObject::connect(this, &QQuickItem::yChanged, this, &ScreencopyView::updateThumbnail);
+	QObject::connect(this, &QQuickItem::widthChanged, this, &ScreencopyView::updateThumbnail);
+	QObject::connect(this, &QQuickItem::heightChanged, this, &ScreencopyView::updateThumbnail);
 }
 
 ScreencopyView::~ScreencopyView() { this->unregisterThumbnail(); }
