@@ -2,8 +2,11 @@
 #include <qdir.h>
 #include <qguiapplication.h>
 #include <qtenvironmentvariables.h>
+#include <qlogging.h>
 #include <qqml.h>
+#include <qquickwindow.h>
 #include <qregion.h>
+#include <qtimer.h>
 #include <qwindow.h>
 
 #include <windows.h>
@@ -15,6 +18,41 @@
 #include "panel_window.hpp"
 
 namespace {
+
+// A graphics device that cannot be recreated (a driver reset under a heavy game) leaves a window that never draws
+// again. Ending the process lets ii-host start a fresh shell with new windows, instead of keeping broken ones.
+void watchSceneGraphs() {
+	for (auto* window: QGuiApplication::topLevelWindows()) {
+		auto* quick = qobject_cast<QQuickWindow*>(window);
+		if (!quick || quick->property("_qsSceneGraphWatched").toBool()) continue;
+		quick->setProperty("_qsSceneGraphWatched", true);
+		QObject::connect(quick, &QQuickWindow::sceneGraphError, [](QQuickWindow::SceneGraphError error, const QString& message) {
+			qCritical() << "scene graph error" << error << message << "- exiting so ii-host starts a new shell";
+			QCoreApplication::exit(70);
+		});
+	}
+}
+
+// ii-host (II_HOST_HWND) is told once a second, from this GUI thread, that the shell is alive. A frozen GUI thread
+// (with the basic render loop it also draws) stops it, and the host gives Windows' taskbar back and restarts the
+// shell. II_TEST_FREEZE=<n> (tests only) freezes this thread on purpose after n beats.
+void startHeartbeat() {
+	const auto host = qEnvironmentVariable("II_HOST_HWND").toULongLong();
+	if (host == 0) return;
+	auto* hostHwnd = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(host)); // NOLINT
+	const auto freezeAfter = qEnvironmentVariableIntValue("II_TEST_FREEZE");
+	auto* timer = new QTimer(QCoreApplication::instance());
+	timer->setInterval(1000);
+	QObject::connect(timer, &QTimer::timeout, [hostHwnd, freezeAfter, beats = 0]() mutable {
+		PostMessageW(hostHwnd, WM_APP + 5, GetCurrentProcessId(), 0); // ii-host's WM_II_HEARTBEAT
+		watchSceneGraphs();
+		if (freezeAfter > 0 && ++beats >= freezeAfter) {
+			qWarning() << "II_TEST_FREEZE: freezing the GUI thread on purpose";
+			for (;;) Sleep(1000);
+		}
+	});
+	timer->start();
+}
 
 class Win32Plugin: public QsEnginePlugin {
 	QList<QString> dependencies() override { return {"window"}; }
@@ -44,6 +82,8 @@ class Win32Plugin: public QsEnginePlugin {
 		// Routes native messages from the start: windows with a custom frame need them even
 		// in processes without panels (e.g. a config's settings app).
 		qs::win32::NativeEventRouter::instance();
+
+		startHeartbeat();
 
 		qs::win32::loadBundledFonts();
 		qs::win32::setupIconThemes();
