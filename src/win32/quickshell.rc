@@ -1,0 +1,32 @@
+// Version resource of quickshell.exe as ii-windows ships it: a clear name, description and author, so antivirus
+// heuristics and the GPU drivers' game profiles do not take a nameless executable for something else.
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION QS_RC_VERSION_MAJOR,QS_RC_VERSION_MINOR,QS_RC_VERSION_PATCH,0
+PRODUCTVERSION QS_RC_VERSION_MAJOR,QS_RC_VERSION_MINOR,QS_RC_VERSION_PATCH,0
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+	BLOCK "StringFileInfo"
+	BEGIN
+		BLOCK "040904B0"
+		BEGIN
+			VALUE "CompanyName", "ii-windows project (github.com/TheCarlosS5/ii-windows)"
+			VALUE "FileDescription", "ii-windows desktop shell (Quickshell for Windows): bar, dock, launcher, desktop"
+			VALUE "FileVersion", QS_RC_VERSION_TEXT
+			VALUE "InternalName", "quickshell"
+			VALUE "OriginalFilename", "quickshell.exe"
+			VALUE "ProductName", "ii-windows (illogical-impulse desktop shell for Windows)"
+			VALUE "ProductVersion", QS_RC_VERSION_TEXT
+			VALUE "LegalCopyright", "Quickshell and ii-windows contributors. Open source (LGPL-3.0)."
+		END
+	END
+	BLOCK "VarFileInfo"
+	BEGIN
+		VALUE "Translation", 0x409, 1200
+	END
+END

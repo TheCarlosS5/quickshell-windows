@@ -31,6 +31,10 @@ endif()
 
 if (WIN32_BACKEND)
 	add_subdirectory(win32)
+	enable_language(RC)
+	target_sources(quickshell PRIVATE win32/quickshell.rc)
+	set_source_files_properties(win32/quickshell.rc PROPERTIES COMPILE_DEFINITIONS
+		"QS_RC_VERSION_MAJOR=${PROJECT_VERSION_MAJOR};QS_RC_VERSION_MINOR=${PROJECT_VERSION_MINOR};QS_RC_VERSION_PATCH=${PROJECT_VERSION_PATCH};QS_RC_VERSION_TEXT=\"${PROJECT_VERSION}\"")
 endif()
 
 if (I3)
