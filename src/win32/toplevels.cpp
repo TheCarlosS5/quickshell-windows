@@ -332,6 +332,8 @@ void WindowTracker::onFlash(quintptr hwnd, bool certain) {
 			handle->update(WindowHandle::Title, reinterpret_cast<quintptr>(GetForegroundWindow())); // NOLINT
 			return;
 		}
+		// The same title, but it changed a moment ago: its REDRAW came after the debounced update. A real flash repeats.
+		if (GetTickCount64() - this->lastNameChange.value(hwnd, 0) < 700) return;
 	}
 	handle->setUrgent(true);
 }
@@ -353,6 +355,7 @@ void WindowTracker::onEvent(quint32 event, quintptr hwnd) {
 	auto tracked = this->byHwnd.contains(hwnd);
 	switch (event) {
 	case EVENT_OBJECT_NAMECHANGE:
+		if (tracked) this->lastNameChange.insert(hwnd, GetTickCount64());
 		// A tracked window's title; another window may count once it has one.
 		this->markDirty(hwnd, tracked ? WindowHandle::Title : MEMBERSHIP);
 		break;
@@ -406,6 +409,7 @@ void WindowTracker::addWindow(quintptr hwnd, quintptr foreground) {
 
 void WindowTracker::removeWindow(WindowHandle* handle) {
 	this->byHwnd.remove(static_cast<quintptr>(handle->hwnd()));
+	this->lastNameChange.remove(static_cast<quintptr>(handle->hwnd()));
 	this->mWindows.removeObject(handle);
 	emit handle->closed();
 	handle->deleteLater();

@@ -182,6 +182,9 @@ private:
 
 	ObjectModel<WindowHandle> mWindows {this};
 	QHash<quintptr, WindowHandle*> byHwnd;
+	// When each window last changed its title (raw NAMECHANGE, before the debounce): a shell REDRAW right after one is
+	// that title change arriving late, not a flash (plan 2026-10-31, F17).
+	QHash<quintptr, quint64> lastNameChange;
 	QPointer<WindowHandle> mActive;
 	QTimer debounce;          // full scan after structural events, at most one a second
 	QTimer pendingTimer;      // the windows with changes, together every 50 ms
