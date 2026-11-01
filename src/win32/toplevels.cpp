@@ -16,6 +16,7 @@
 // clang-format on
 
 #include "../core/qmlglobal.hpp"
+#include "crash.hpp"
 #include "virtualdesktops.hpp"
 
 namespace qs::win32 {
@@ -332,6 +333,7 @@ void WindowTracker::forceForeground(quintptr handle) {
 }
 
 void WindowTracker::refresh() {
+	crash::ScopedSubsystem subsystem("toplevels");
 	QList<quintptr> found;
 	EnumWindows(
 	    [](HWND hwnd, LPARAM data) -> BOOL {

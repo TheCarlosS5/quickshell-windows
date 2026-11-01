@@ -1,11 +1,19 @@
 #include "mpris.hpp"
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
+#include <vector>
 
 #include <qcoreapplication.h>
 #include <qcryptographichash.h>
 #include <qdir.h>
 #include <qfile.h>
+#include <qfileinfo.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qprocess.h>
@@ -22,12 +30,29 @@
 // clang-format on
 
 #include "../../core/logcat.hpp"
+#include "../crash.hpp"
+
+// Media sessions (GSMTC) for Quickshell's MPRIS API.
+//
+// Plan 2026-10-31, A1. The previous version crashed the whole shell (0xC0000005, every 10-40 minutes while scrolling
+// X or YouTube in a browser, since v0.1.3): a browser drops a media session at any moment, and then the session's
+// getters (GetPlaybackInfo, GetTimelineProperties, Controls...) return S_OK with a null object instead of failing;
+// calling through it reads address 0, which no C++ catch can stop. The rules now:
+//   1. every object a WinRT getter returns is checked before use;
+//   2. one worker thread (MTA) does all the reading; WinRT's event callbacks only mark a session dirty and wake it,
+//      so nothing runs twice at once for one session and the thread pool never blocks;
+//   3. a burst of events (a new video changes title, state and timeline at once) is read once, 80 ms later;
+//   4. a session keeps the key it got when first seen ("Brave", "Brave#2") until it goes; keys never shift;
+//   5. event handlers are removed (by token) when their session goes, so a dead session sends nothing;
+//   6. nothing waits for ever: asynchronous calls get 2 s (a hung app costs one round, not a thread);
+//   7. the cover is read once per track, not on every event, and kept in a bounded cache.
 
 namespace qs::win32::mpris {
 
 QS_LOGGING_CATEGORY(logMpris, "quickshell.win32.mpris", QtInfoMsg);
 
 using namespace winrt::Windows::Media::Control;
+using winrt::Windows::Foundation::AsyncStatus;
 using winrt::Windows::Media::MediaPlaybackAutoRepeatMode;
 
 QString MprisPlaybackState::toString(MprisPlaybackState::Enum status) {
@@ -50,8 +75,39 @@ namespace {
 
 QString toQ(const winrt::hstring& s) { return QString::fromWCharArray(s.c_str(), static_cast<qsizetype>(s.size())); }
 
-// Owns the GSMTC manager and sessions. WinRT calls that block (.get()) run on the worker
-// thread or on WinRT's thread pool (event callbacks), never on the GUI (STA) thread.
+constexpr auto WAIT_ASYNC = std::chrono::seconds(2);
+constexpr auto BURST = std::chrono::milliseconds(80);
+constexpr qsizetype ART_CACHE_FILES = 200;
+constexpr qint64 ART_CACHE_BYTES = 50LL * 1024 * 1024;
+constexpr uint32_t ART_MAX_BYTES = 8U * 1024 * 1024;
+
+// An asynchronous WinRT call, waited for at most WAIT_ASYNC; nullptr-equivalent result when it did not finish.
+template <typename Operation>
+auto resultOf(Operation operation) -> decltype(operation.GetResults()) {
+	if (!operation) return {nullptr};
+	if (operation.wait_for(WAIT_ASYNC) != AsyncStatus::Completed) {
+		try {
+			operation.Cancel();
+		} catch (...) {}
+		return {nullptr};
+	}
+	return operation.GetResults();
+}
+
+struct SessionEntry {
+	GlobalSystemMediaTransportControlsSession session {nullptr};
+	QString key;
+	QString app; // SourceAppUserModelId
+	winrt::event_token mediaToken {};
+	winrt::event_token playbackToken {};
+	winrt::event_token timelineToken {};
+	std::atomic<bool> dirty {true};
+	QString lastTrack; // title \x1f artist \x1f album of the last cover read
+	QString lastArt;
+};
+
+// Owns the GSMTC manager and sessions. The worker thread is the only one that creates, changes or drops entries;
+// the GUI thread only looks them up (under the mutex) to send play/pause/... commands.
 class Backend: public QObject {
 public:
 	static Backend* instance() {
@@ -61,144 +117,291 @@ public:
 
 	ObjectModel<MprisPlayer> players {this};
 
-	GlobalSystemMediaTransportControlsSession session(const QString& id) {
+	GlobalSystemMediaTransportControlsSession session(const QString& key) {
 		std::scoped_lock lock(this->mutex);
-		auto it = this->sessions.find(id);
-		return it == this->sessions.end() ? nullptr : it.value();
+		for (const auto& entry: this->entries) {
+			if (entry->key == key) return entry->session;
+		}
+		return nullptr;
 	}
 
 private:
 	Backend() {
-		std::thread([this]() {
-			try {
-				winrt::init_apartment(winrt::apartment_type::multi_threaded);
-				this->manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
-				this->manager.SessionsChanged([this](auto&&, auto&&) { this->refreshSessions(); });
-				this->refreshSessions();
-				qCInfo(logMpris) << "Media sessions ready";
-			} catch (const winrt::hresult_error& e) {
-				qCWarning(logMpris) << "GSMTC unavailable:" << toQ(e.message());
-			}
-		}).detach();
+		if (crash::disabled("mpris")) {
+			qCInfo(logMpris) << "Media sessions disabled by II_DISABLE / II_SAFE_MODE";
+			return;
+		}
+		std::thread([this]() { this->run(); }).detach();
 	}
 
+	void wake(bool sessionsChanged) {
+		{
+			std::scoped_lock lock(this->mutex);
+			if (sessionsChanged) this->sessionsDirty = true;
+			this->anyDirty = true;
+		}
+		this->wakeUp.notify_one();
+	}
+
+	void run() {
+		crash::setThreadSubsystem("mpris");
+		try {
+			winrt::init_apartment(winrt::apartment_type::multi_threaded);
+			this->manager = resultOf(GlobalSystemMediaTransportControlsSessionManager::RequestAsync());
+			if (!this->manager) {
+				qCWarning(logMpris) << "GSMTC unavailable: the session manager did not answer";
+				return;
+			}
+			this->manager.SessionsChanged([this](auto&&, auto&&) { this->wake(true); });
+			qCInfo(logMpris) << "Media sessions ready";
+		} catch (const winrt::hresult_error& e) {
+			qCWarning(logMpris) << "GSMTC unavailable:" << toQ(e.message());
+			return;
+		}
+		this->trimArtCache();
+
+		for (;;) {
+			bool refresh = false;
+			{
+				std::unique_lock lock(this->mutex);
+				this->wakeUp.wait(lock, [this]() { return this->sessionsDirty || this->anyDirty; });
+			}
+			std::this_thread::sleep_for(BURST);
+			{
+				std::scoped_lock lock(this->mutex);
+				refresh = this->sessionsDirty;
+				this->sessionsDirty = false;
+				this->anyDirty = false;
+			}
+			if (refresh) this->refreshSessions();
+			for (const auto& entry: std::vector(this->entries)) { // a copy: only this thread changes the list
+				if (!entry->dirty.exchange(false)) continue;
+				if (auto state = this->readState(*entry)) this->post(entry->key, *state);
+			}
+		}
+	}
+
+	void subscribe(const std::shared_ptr<SessionEntry>& entry) {
+		std::weak_ptr<SessionEntry> weak = entry;
+		auto mark = [this, weak](auto&&, auto&&) {
+			if (auto e = weak.lock()) {
+				e->dirty = true;
+				this->wake(false);
+			}
+		};
+		try {
+			entry->mediaToken = entry->session.MediaPropertiesChanged(mark);
+			entry->playbackToken = entry->session.PlaybackInfoChanged(mark);
+			entry->timelineToken = entry->session.TimelinePropertiesChanged(mark);
+		} catch (const winrt::hresult_error& e) {
+			qCInfo(logMpris) << "Session" << entry->key << "events unavailable:" << Qt::hex << static_cast<quint32>(e.code());
+		}
+	}
+
+	static void unsubscribe(SessionEntry& entry) {
+		if (!entry.session) return;
+		try {
+			if (entry.mediaToken) entry.session.MediaPropertiesChanged(entry.mediaToken);
+			if (entry.playbackToken) entry.session.PlaybackInfoChanged(entry.playbackToken);
+			if (entry.timelineToken) entry.session.TimelinePropertiesChanged(entry.timelineToken);
+		} catch (...) {} // a session that is already gone has nothing left to remove
+		entry.mediaToken = entry.playbackToken = entry.timelineToken = {};
+	}
+
+	QString newKey(const QString& app) {
+		auto taken = [this](const QString& key) {
+			return std::any_of(this->entries.begin(), this->entries.end(), [&](const auto& e) { return e->key == key; });
+		};
+		if (!taken(app)) return app;
+		auto& serial = this->serials[app];
+		if (serial < 2) serial = 2;
+		while (taken(app + '#' + QString::number(serial))) ++serial;
+		return app + '#' + QString::number(serial++);
+	}
+
+	// Worker thread: pair what Windows lists now with the entries we have. Matched by object identity; a session
+	// Windows hands back as a new object (if it ever does) takes over an unmatched entry of the same app, so its key
+	// and player stay.
 	void refreshSessions() {
-		QHash<QString, GlobalSystemMediaTransportControlsSession> current;
+		std::vector<std::pair<GlobalSystemMediaTransportControlsSession, QString>> current;
 		try {
 			auto list = this->manager.GetSessions();
-			QHash<QString, int> seen;
+			if (!list) return;
 			for (const auto& session: list) {
-				auto app = toQ(session.SourceAppUserModelId());
-				auto n = seen[app]++;
-				current.insert(n == 0 ? app : app + '#' + QString::number(n), session);
+				if (!session) continue;
+				current.emplace_back(session, toQ(session.SourceAppUserModelId()));
 			}
-		} catch (...) {
+		} catch (const winrt::hresult_error& e) {
+			qCInfo(logMpris) << "Sessions not readable:" << Qt::hex << static_cast<quint32>(e.code());
 			return;
 		}
 
-		QStringList added;
-		QStringList removed;
-		{
-			std::scoped_lock lock(this->mutex);
-			for (auto it = current.begin(); it != current.end(); ++it) {
-				if (this->sessions.contains(it.key())) continue;
-				added.append(it.key());
-				this->subscribe(it.key(), it.value());
-			}
-			for (auto it = this->sessions.begin(); it != this->sessions.end(); ++it) {
-				if (!current.contains(it.key())) removed.append(it.key());
-			}
-			this->sessions = current;
-		}
-
-		QMetaObject::invokeMethod(this, [this, added, removed]() {
-			for (const auto& id: removed) {
-				for (auto* player: QList(this->players.valueList())) {
-					if (player->sessionId() == id) {
-						this->players.removeObject(player);
-						player->deleteLater();
-					}
+		std::vector<bool> entryMatched(this->entries.size(), false);
+		std::vector<bool> sessionMatched(current.size(), false);
+		for (size_t s = 0; s < current.size(); ++s) {
+			for (size_t e = 0; e < this->entries.size(); ++e) {
+				if (!entryMatched[e] && this->entries[e]->session == current[s].first) {
+					entryMatched[e] = sessionMatched[s] = true;
+					break;
 				}
 			}
-			for (const auto& id: added) {
-				auto app = id.section('#', 0, 0);
-				this->players.insertObject(new MprisPlayer(id, app, this));
+		}
+
+		QList<QPair<QString, QString>> added; // key, app
+		QStringList removed;
+		std::vector<std::shared_ptr<SessionEntry>> next;
+		for (size_t e = 0; e < this->entries.size(); ++e) {
+			if (entryMatched[e]) next.push_back(this->entries[e]);
+		}
+		for (size_t s = 0; s < current.size(); ++s) {
+			if (sessionMatched[s]) continue;
+			std::shared_ptr<SessionEntry> entry;
+			for (size_t e = 0; e < this->entries.size(); ++e) {
+				if (!entryMatched[e] && this->entries[e]->app == current[s].second) {
+					entryMatched[e] = true;
+					entry = this->entries[e];
+					unsubscribe(*entry);
+					break;
+				}
+			}
+			if (!entry) {
+				entry = std::make_shared<SessionEntry>();
+				entry->app = current[s].second;
+				entry->key = this->newKey(entry->app);
+				added.append({entry->key, entry->app});
+			}
+			entry->session = current[s].first;
+			entry->dirty = true;
+			this->subscribe(entry);
+			next.push_back(entry);
+		}
+		for (size_t e = 0; e < this->entries.size(); ++e) {
+			if (entryMatched[e]) continue;
+			unsubscribe(*this->entries[e]);
+			removed.append(this->entries[e]->key);
+		}
+		{
+			std::scoped_lock lock(this->mutex);
+			this->entries = std::move(next);
+		}
+		if (!added.isEmpty() || !removed.isEmpty()) {
+			qCInfo(logMpris) << "Sessions:" << this->entries.size() << "added" << added.size() << "removed" << removed;
+			QMetaObject::invokeMethod(this, [this, added, removed]() { this->applySessions(added, removed); });
+		}
+	}
+
+	// GUI thread.
+	void applySessions(const QList<QPair<QString, QString>>& added, const QStringList& removed) {
+		for (const auto& key: removed) {
+			for (auto* player: QList(this->players.valueList())) {
+				if (player->sessionId() == key) {
+					this->players.removeObject(player);
+					player->deleteLater();
+				}
+			}
+		}
+		for (const auto& [key, app]: added) {
+			auto exists = std::any_of(this->players.valueList().begin(), this->players.valueList().end(), [&](auto* p) {
+				return p->sessionId() == key;
+			});
+			if (!exists) this->players.insertObject(new MprisPlayer(key, app, this));
+		}
+	}
+
+	void post(const QString& key, const PlayerState& state) {
+		QMetaObject::invokeMethod(this, [this, key, state]() {
+			for (auto* player: this->players.valueList()) {
+				if (player->sessionId() == key) player->apply(state);
 			}
 		});
-
-		for (const auto& id: added) this->pushState(id);
 	}
 
-	void subscribe(const QString& id, const GlobalSystemMediaTransportControlsSession& session) {
-		session.MediaPropertiesChanged([this, id](auto&&, auto&&) { this->pushState(id); });
-		session.PlaybackInfoChanged([this, id](auto&&, auto&&) { this->pushState(id); });
-		session.TimelinePropertiesChanged([this, id](auto&&, auto&&) { this->pushState(id); });
+	static QString artDir() {
+		auto base = qEnvironmentVariable("II_DATA_DIR");
+		if (base.isEmpty()) base = QDir(qEnvironmentVariable("LOCALAPPDATA")).filePath("ii-windows");
+		return QDir(base).filePath("cache/media-art");
 	}
 
-	static QString saveArt(const winrt::Windows::Storage::Streams::IRandomAccessStreamReference& ref) {
+	// Newest ART_CACHE_FILES covers, at most ART_CACHE_BYTES in all.
+	void trimArtCache() {
+		auto files = QDir(artDir()).entryInfoList({"*.img"}, QDir::Files, QDir::Time);
+		qint64 total = 0;
+		for (qsizetype i = 0; i < files.size(); ++i) {
+			total += files[i].size();
+			if (i >= ART_CACHE_FILES || total > ART_CACHE_BYTES) QFile::remove(files[i].filePath());
+		}
+		this->savedSinceTrim = 0;
+	}
+
+	QString saveArt(const winrt::Windows::Storage::Streams::IRandomAccessStreamReference& ref) {
 		if (!ref) return {};
 		try {
-			auto stream = ref.OpenReadAsync().get();
-			auto size = static_cast<uint32_t>(stream.Size());
-			if (size == 0 || size > 32 * 1024 * 1024) return {};
+			auto stream = resultOf(ref.OpenReadAsync());
+			if (!stream) return {};
+			auto size = static_cast<uint32_t>(std::min<uint64_t>(stream.Size(), UINT32_MAX));
+			if (size == 0 || size > ART_MAX_BYTES) return {};
 			winrt::Windows::Storage::Streams::DataReader reader(stream);
-			reader.LoadAsync(size).get();
-			QByteArray bytes(static_cast<qsizetype>(size), Qt::Uninitialized);
-			reader.ReadBytes(winrt::array_view<uint8_t>(reinterpret_cast<uint8_t*>(bytes.data()), size)); // NOLINT
+			auto load = reader.LoadAsync(size);
+			if (!load || load.wait_for(WAIT_ASYNC) != AsyncStatus::Completed) return {};
+			auto loaded = load.GetResults();
+			if (loaded == 0) return {};
+			QByteArray bytes(static_cast<qsizetype>(loaded), Qt::Uninitialized);
+			reader.ReadBytes(winrt::array_view<uint8_t>(reinterpret_cast<uint8_t*>(bytes.data()), loaded)); // NOLINT
 
-			auto dir = QDir(QDir::tempPath()).filePath("ii-windows/mpris");
+			auto dir = artDir();
 			QDir().mkpath(dir);
 			auto hash = QCryptographicHash::hash(bytes, QCryptographicHash::Sha1).toHex();
 			auto path = QDir(dir).filePath(QString::fromLatin1(hash) + ".img");
 			if (!QFile::exists(path)) {
 				QFile file(path);
 				if (file.open(QFile::WriteOnly)) file.write(bytes);
+				if (++this->savedSinceTrim >= 50) this->trimArtCache();
 			}
 			return QUrl::fromLocalFile(path).toString();
-		} catch (...) {
+		} catch (const winrt::hresult_error&) {
 			return {};
 		}
 	}
 
-	// Runs on WinRT's thread pool.
-	void pushState(const QString& id) {
-		auto session = this->session(id);
-		if (!session) return;
-
+	// Worker thread. std::nullopt = this session cannot be read right now (it is closing): nothing is sent, and the
+	// SessionsChanged that follows removes it.
+	std::optional<PlayerState> readState(SessionEntry& e) {
 		PlayerState state;
 		try {
-			auto props = session.TryGetMediaPropertiesAsync().get();
-			if (props) {
+			auto session = e.session;
+			if (!session) return std::nullopt;
+
+			if (auto props = resultOf(session.TryGetMediaPropertiesAsync())) {
 				state.title = toQ(props.Title());
 				state.artist = toQ(props.Artist());
 				state.album = toQ(props.AlbumTitle());
 				state.albumArtist = toQ(props.AlbumArtist());
-				state.artUrl = saveArt(props.Thumbnail());
+				auto track = state.title + QChar(0x1f) + state.artist + QChar(0x1f) + state.album;
+				if (track != e.lastTrack || e.lastArt.isEmpty()) {
+					auto art = this->saveArt(props.Thumbnail());
+					// A cover that is not ready yet is asked again on the next event of the same track.
+					if (!art.isEmpty() || track != e.lastTrack) e.lastArt = art;
+					e.lastTrack = track;
+				}
+				state.artUrl = e.lastArt;
 			}
-			qCDebug(logMpris) << "Session" << id << "title" << state.title << "artist" << state.artist;
-		} catch (const winrt::hresult_error& e) {
-			qCWarning(logMpris) << "Media properties unavailable for" << id << toQ(e.message());
-		} catch (...) {}
 
-		try {
 			auto info = session.GetPlaybackInfo();
+			if (!info) return std::nullopt;
 			switch (info.PlaybackStatus()) {
-			case GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing:
-				state.playback = MprisPlaybackState::Playing;
-				break;
-			case GlobalSystemMediaTransportControlsSessionPlaybackStatus::Paused:
-				state.playback = MprisPlaybackState::Paused;
-				break;
+			case GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing: state.playback = MprisPlaybackState::Playing; break;
+			case GlobalSystemMediaTransportControlsSessionPlaybackStatus::Paused: state.playback = MprisPlaybackState::Paused; break;
 			default: state.playback = MprisPlaybackState::Stopped; break;
 			}
-			auto controls = info.Controls();
-			state.canPlay = controls.IsPlayEnabled();
-			state.canPause = controls.IsPauseEnabled() || controls.IsPlayPauseToggleEnabled();
-			state.canNext = controls.IsNextEnabled();
-			state.canPrevious = controls.IsPreviousEnabled();
-			state.canSeek = controls.IsPlaybackPositionEnabled();
-			state.shuffleSupported = controls.IsShuffleEnabled();
-			state.loopSupported = controls.IsRepeatEnabled();
+			if (auto controls = info.Controls()) {
+				state.canPlay = controls.IsPlayEnabled();
+				state.canPause = controls.IsPauseEnabled() || controls.IsPlayPauseToggleEnabled();
+				state.canNext = controls.IsNextEnabled();
+				state.canPrevious = controls.IsPreviousEnabled();
+				state.canSeek = controls.IsPlaybackPositionEnabled();
+				state.shuffleSupported = controls.IsShuffleEnabled();
+				state.loopSupported = controls.IsRepeatEnabled();
+			}
 			if (auto shuffle = info.IsShuffleActive()) state.shuffle = shuffle.Value();
 			if (auto repeat = info.AutoRepeatMode()) {
 				auto mode = repeat.Value();
@@ -207,35 +410,37 @@ private:
 				                                                       : MprisLoopState::None;
 			}
 			if (auto rate = info.PlaybackRate()) state.rate = rate.Value();
-		} catch (...) {}
 
-		try {
-			auto timeline = session.GetTimelineProperties();
-			auto seconds = [](winrt::Windows::Foundation::TimeSpan span) {
-				return std::chrono::duration<double>(span).count();
-			};
-			state.length = seconds(timeline.EndTime() - timeline.StartTime());
-			auto position = seconds(timeline.Position() - timeline.StartTime());
-			// Apps report the position at LastUpdatedTime; bring it to now while playing.
-			auto age = std::chrono::duration<double>(winrt::clock::now() - timeline.LastUpdatedTime()).count();
-			if (state.playback == MprisPlaybackState::Playing && age > 0 && age < 24 * 3600) {
-				position += age * state.rate;
+			if (auto timeline = session.GetTimelineProperties()) {
+				auto seconds = [](winrt::Windows::Foundation::TimeSpan span) {
+					return std::chrono::duration<double>(span).count();
+				};
+				auto start = timeline.StartTime();
+				state.length = std::max(0.0, seconds(timeline.EndTime() - start));
+				auto position = seconds(timeline.Position() - start);
+				// Apps report the position at LastUpdatedTime; bring it to now while playing.
+				auto age = std::chrono::duration<double>(winrt::clock::now() - timeline.LastUpdatedTime()).count();
+				if (state.playback == MprisPlaybackState::Playing && age > 0 && age < 24 * 3600) position += age * state.rate;
+				if (state.length > 0) position = std::min(position, state.length);
+				state.position = std::max(0.0, position);
+				state.positionUpdated = QDateTime::currentDateTimeUtc();
 			}
-			if (state.length > 0) position = std::min(position, state.length);
-			state.position = std::max(0.0, position);
-			state.positionUpdated = QDateTime::currentDateTimeUtc();
-		} catch (...) {}
-
-		QMetaObject::invokeMethod(this, [this, id, state]() {
-			for (auto* player: this->players.valueList()) {
-				if (player->sessionId() == id) player->apply(state);
-			}
-		});
+		} catch (const winrt::hresult_error& error) {
+			qCInfo(logMpris) << "Session" << e.key << "not readable:" << Qt::hex << static_cast<quint32>(error.code());
+			return std::nullopt;
+		}
+		qCDebug(logMpris) << "Session" << e.key << "state" << state.playback;
+		return state;
 	}
 
 	std::mutex mutex;
+	std::condition_variable wakeUp;
+	bool sessionsDirty = true;
+	bool anyDirty = true;
 	GlobalSystemMediaTransportControlsSessionManager manager {nullptr};
-	QHash<QString, GlobalSystemMediaTransportControlsSession> sessions;
+	std::vector<std::shared_ptr<SessionEntry>> entries; // written only by the worker, under the mutex
+	QHash<QString, int> serials;                         // worker only
+	int savedSinceTrim = 0;                              // worker only
 };
 
 // "Spotify.exe" -> "Spotify", "Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic" -> "ZuneMusic"
@@ -243,8 +448,10 @@ QString identityFor(const QString& aumid) {
 	try {
 		auto info = winrt::Windows::ApplicationModel::AppInfo::GetFromAppUserModelId(winrt::hstring(aumid.toStdWString()));
 		if (info) {
-			auto name = toQ(info.DisplayInfo().DisplayName());
-			if (!name.isEmpty()) return name;
+			if (auto display = info.DisplayInfo()) {
+				auto name = toQ(display.DisplayName());
+				if (!name.isEmpty()) return name;
+			}
 		}
 	} catch (...) {}
 
@@ -262,7 +469,9 @@ void withSession(const QString& id, F&& action) {
 	if (!session) return;
 	try {
 		action(session);
-	} catch (...) {}
+	} catch (const winrt::hresult_error& e) {
+		qCInfo(logMpris) << "Command for" << id << "failed:" << Qt::hex << static_cast<quint32>(e.code());
+	}
 }
 
 } // namespace

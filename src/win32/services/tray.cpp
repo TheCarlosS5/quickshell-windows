@@ -23,6 +23,7 @@
 #include <shlobj.h>
 
 #include "../../core/logcat.hpp"
+#include "../crash.hpp"
 
 namespace qs::win32::tray {
 
@@ -289,7 +290,10 @@ private:
 class TrayHost {
 public:
 	static void start() {
-		std::thread([]() { TrayHost().run(); }).detach();
+		std::thread([]() {
+			qs::win32::crash::setThreadSubsystem("tray");
+			TrayHost().run();
+		}).detach();
 	}
 
 private:

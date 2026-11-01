@@ -31,6 +31,7 @@
 
 #include "../../core/desktopentry.hpp"
 #include "../../core/logcat.hpp"
+#include "../crash.hpp"
 
 namespace qs::win32::notifications {
 
@@ -147,7 +148,16 @@ private:
 	Backend() {
 		this->createSink();
 		this->readHostHandshake();
-		std::thread([this]() { this->pollToasts(); }).detach();
+		// II_DISABLE=notifications / safe mode: no listener; ii-host then never hears a healthy report and keeps
+		// Windows' own banners on, so no notification is lost.
+		if (crash::disabled("notifications")) {
+			qCInfo(logNotifs) << "Windows notifications reader disabled by II_DISABLE / II_SAFE_MODE";
+			return;
+		}
+		std::thread([this]() {
+			crash::setThreadSubsystem("notifications");
+			this->pollToasts();
+		}).detach();
 	}
 
 	// ii-host starts the shell with II_HOST_HWND (its window), II_INSTANCE_ID (an id for this

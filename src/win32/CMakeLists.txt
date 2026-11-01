@@ -14,10 +14,10 @@ qt_add_qml_module(quickshell-win32
 
 install_qml_module(quickshell-win32)
 
-add_library(quickshell-win32-init OBJECT init.cpp fonts.cpp)
+add_library(quickshell-win32-init OBJECT init.cpp fonts.cpp crash.cpp)
 
 target_link_libraries(quickshell-win32 PUBLIC Qt::Quick Qt6::QuickPrivate dwmapi shell32 user32 ole32 propsys wtsapi32 shlwapi)
-target_link_libraries(quickshell-win32-init PRIVATE Qt::Quick Qt::Qml Qt6::QuickPrivate dxgi)
+target_link_libraries(quickshell-win32-init PRIVATE Qt::Quick Qt::Qml Qt6::QuickPrivate dxgi dbghelp)
 
 qs_module_pch(quickshell-win32 SET large)
 
@@ -127,3 +127,9 @@ qt_add_executable(ii-hardware-test services/hardware_test.cpp services/battery.c
 	services/bluetooth.cpp services/bluetooth.hpp ../core/model.cpp ../core/model.hpp)
 target_compile_options(ii-hardware-test PRIVATE /EHsc)
 target_link_libraries(ii-hardware-test PRIVATE Qt::Quick windowsapp powrprof)
+
+# Test tool (plan 2026-10-31, A8): creates and drops silent media sessions like a browser feed, to stress the MPRIS
+# backend. No Qt.
+add_executable(ii-media-churn services/media_churn.cpp)
+target_compile_options(ii-media-churn PRIVATE /EHsc)
+target_link_libraries(ii-media-churn PRIVATE windowsapp)

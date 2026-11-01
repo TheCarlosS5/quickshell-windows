@@ -1,5 +1,6 @@
 #include "battery.hpp"
 #include "hardware_async.hpp"
+#include "../crash.hpp"
 #include <algorithm>
 #include <atomic>
 #include <thread>
@@ -223,7 +224,7 @@ struct UPower::Runtime: std::enable_shared_from_this<Runtime> {
 };
 UPower::UPower(QObject* parent): QObject(parent), runtime(std::make_shared<Runtime>(this)) {
 	// No blocking enumeration or WinRT waits on Qt's GUI thread.
-	std::thread([state = runtime] { winrt::init_apartment(); if (!state->stopped) state->start(); }).detach();
+	std::thread([state = runtime] { qs::win32::crash::setThreadSubsystem("battery"); winrt::init_apartment(); if (!state->stopped) state->start(); }).detach();
 }
 UPower::~UPower() { runtime->stop(); }
 void UPower::update(const QString& id, const BatterySnapshot& snapshot) {
