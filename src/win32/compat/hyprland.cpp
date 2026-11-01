@@ -1,5 +1,7 @@
 #include "hyprland.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <string>
 
 #include <qguiapplication.h>
@@ -16,6 +18,7 @@
 #include "../../core/qmlglobal.hpp"
 #include "../../window/proxywindow.hpp"
 #include "../native.hpp"
+#include "../screens.hpp"
 #include "../virtualdesktops.hpp"
 
 namespace qs::win32::compat {
@@ -277,35 +280,20 @@ QVariantMap HyprlandMonitor::lastIpcObject() const {
 	// and its work area (our bar's appbar).
 	QVariantList reserved {0, 0, 0, 0};
 	if (this->mScreen) {
-		struct Find {
-			std::wstring device;
-			MONITORINFOEXW info {};
-			bool found = false;
-		} find {this->mScreen->name().toStdWString()};
-		EnumDisplayMonitors(
-		    nullptr,
-		    nullptr,
-		    [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
-			    auto* f = reinterpret_cast<Find*>(data); // NOLINT
-			    MONITORINFOEXW info {};
-			    info.cbSize = sizeof(info);
-			    if (GetMonitorInfoW(monitor, &info) && f->device == info.szDevice) {
-				    f->info = info;
-				    f->found = true;
-				    return FALSE;
-			    }
-			    return TRUE;
-		    },
-		    reinterpret_cast<LPARAM>(&find) // NOLINT
-		);
-		if (find.found) {
-			const auto& m = find.info.rcMonitor;
-			const auto& w = find.info.rcWork;
+		// By the screen's HMONITOR: its name is not the device name (screens.hpp).
+		MONITORINFO info {};
+		info.cbSize = sizeof(info);
+		auto* monitor = monitorOf(this->mScreen);
+		if (monitor && GetMonitorInfoW(monitor, &info)) {
+			const auto& m = info.rcMonitor;
+			const auto& w = info.rcWork;
+			// In the screen's logical pixels, like the rest of the monitor object (width / scale).
+			auto dpr = std::max(1.0, this->mScreen->devicePixelRatio());
 			reserved = QVariantList {
-			    static_cast<int>(w.left - m.left),
-			    static_cast<int>(w.top - m.top),
-			    static_cast<int>(m.right - w.right),
-			    static_cast<int>(m.bottom - w.bottom),
+			    static_cast<int>(std::lround((w.left - m.left) / dpr)),
+			    static_cast<int>(std::lround((w.top - m.top) / dpr)),
+			    static_cast<int>(std::lround((m.right - w.right) / dpr)),
+			    static_cast<int>(std::lround((m.bottom - w.bottom) / dpr)),
 			};
 		}
 	}
@@ -489,14 +477,11 @@ void HyprlandIpcQml::syncScreens() {
 void HyprlandIpcQml::updateFocusedMonitor() {
 	POINT cursor;
 	GetCursorPos(&cursor);
-	MONITORINFOEXW info {};
-	info.cbSize = sizeof(info);
-	GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY), &info);
-	auto device = QString::fromWCharArray(info.szDevice);
+	auto* under = screenOf(MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY)); // by HMONITOR (screens.hpp)
 
 	HyprlandMonitor* focused = nullptr;
 	for (auto [screen, monitor]: this->byScreen.asKeyValueRange()) {
-		if (screen->name() == device) focused = monitor;
+		if (screen == under) focused = monitor;
 	}
 	if (!focused && !this->byScreen.isEmpty()) focused = this->monitorForScreen(QGuiApplication::primaryScreen());
 	if (focused == this->mFocused) return;

@@ -18,6 +18,7 @@
 
 #include "../core/qmlglobal.hpp"
 #include "crash.hpp"
+#include "screens.hpp"
 #include "virtualdesktops.hpp"
 
 namespace qs::win32 {
@@ -76,15 +77,11 @@ QString packagedAppUserModelId(DWORD pid) {
 	return id;
 }
 
-QuickshellScreenInfo* screenOf(HWND hwnd) {
-	MONITORINFOEXW info {};
-	info.cbSize = sizeof(info);
-	if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &info)) return nullptr;
-	auto device = QString::fromWCharArray(info.szDevice);
-	for (auto* screen: QGuiApplication::screens()) {
-		if (screen->name() == device) return QuickshellTracked::instance()->screenInfo(screen);
-	}
-	return nullptr;
+// By HMONITOR: matching QScreen::name() with the device name found nothing in recent Qt (screens.hpp), so windows
+// had no screen and services/DesktopCover.qml never saw the desktop covered.
+QuickshellScreenInfo* screenInfoOf(HWND hwnd) {
+	auto* screen = qs::win32::screenOf(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST));
+	return screen ? QuickshellTracked::instance()->screenInfo(screen) : nullptr;
 }
 
 // Set as soon as the tracker exists, before anything in its constructor can wait. The hook callbacks
@@ -216,7 +213,7 @@ void WindowHandle::update(quint8 parts, quintptr foreground) {
 		emit this->fullscreenChanged();
 	}
 
-	auto* screen = screenOf(h);
+	auto* screen = screenInfoOf(h);
 	auto screens = screen ? QList<QuickshellScreenInfo*> {screen} : QList<QuickshellScreenInfo*> {};
 	if (screens != this->mScreens) {
 		this->mScreens = screens;
