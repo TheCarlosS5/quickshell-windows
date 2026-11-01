@@ -443,6 +443,15 @@ LRESULT CALLBACK sinkWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 			auto timeout = fields[5].toDouble(&ok);
 			if (ok) data.expireTimeout = timeout;
 			data.transient = fields[6] == "1";
+			// Field 8 (ii-host only): "label\x1ecommand\x1dlabel\x1ecommand" -> buttons that send the command to ii-host.
+			if (fields.size() > 7 && !fields[7].isEmpty()) {
+				for (const auto& pair: fields[7].split(QChar(0x1d), Qt::SkipEmptyParts)) {
+					auto parts = pair.split(QChar(0x1e));
+					if (parts.size() == 2 && !parts[0].isEmpty() && !parts[1].isEmpty() && parts[1].size() < 200) {
+						data.hostActions.append({parts[0], parts[1]});
+					}
+				}
+			}
 
 			// Deliver after returning so the sender is never blocked on QML.
 			QMetaObject::invokeMethod(
@@ -467,6 +476,20 @@ NotificationAction::NotificationAction(QString identifier, QString text, Notific
     , notification(notification) {}
 
 void NotificationAction::invoke() {
+	// A button of one of ii-host's own notifications: its command goes to ii-host (the same message as
+	// `ii-shim host <command>`), then the notification closes.
+	if (this->mIdentifier.startsWith("host:")) {
+		const auto host = qEnvironmentVariable("II_HOST_HWND").toULongLong();
+		if (host != 0) {
+			auto command = this->mIdentifier.mid(5).toStdWString();
+			COPYDATASTRUCT data {0x49490040, static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)), command.data()};
+			DWORD_PTR result = 0;
+			SendMessageTimeoutW(reinterpret_cast<HWND>(static_cast<ULONG_PTR>(host)), WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data), // NOLINT
+			                    SMTO_ABORTIFHUNG, 2000, &result);
+		}
+		this->notification->close(NotificationCloseReason::Dismissed);
+		return;
+	}
 	// Toast buttons can't be pressed from outside; the one action a toast gets opens its app.
 	if (this->mIdentifier == "default" && !this->notification->data().appId.isEmpty()) {
 		Backend::launch(this->notification->data().appId);
@@ -483,6 +506,9 @@ Notification::Notification(quint32 id, NotificationData data, QString desktopEnt
     , mDesktopEntry(std::move(desktopEntry)) {
 	if (this->d.toastId != 0 && !this->d.appId.isEmpty()) {
 		this->mActions.append(new NotificationAction("default", QCoreApplication::translate("notifications", "Open"), this));
+	}
+	for (const auto& [label, command]: this->d.hostActions) {
+		this->mActions.append(new NotificationAction("host:" + command, label, this));
 	}
 }
 

@@ -79,6 +79,8 @@ struct NotificationData {
 	NotificationUrgency::Enum urgency = NotificationUrgency::Normal;
 	qreal expireTimeout = -1;
 	bool transient = false;
+	// Buttons that send a command to ii-host (plan 2026-10-31, B3: "Actualizar", "Más tarde"...): label, command.
+	QList<QPair<QString, QString>> hostActions;
 };
 
 class Notification: public QObject {
