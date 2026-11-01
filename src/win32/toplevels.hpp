@@ -38,6 +38,8 @@ class WindowHandle: public QObject {
 	Q_PROPERTY(QRect geometry READ geometry NOTIFY geometryChanged);
 	/// Index of the virtual desktop the window is on (-1: unknown or on all of them).
 	Q_PROPERTY(qint32 desktop READ desktop NOTIFY desktopChanged);
+	/// The window asked for attention (it flashed its taskbar button) and has not been brought up since.
+	Q_PROPERTY(bool urgent READ urgent NOTIFY urgentChanged);
 	// clang-format on
 
 public:
@@ -56,6 +58,12 @@ public:
 	[[nodiscard]] qint64 pid() const { return this->mPid; }
 	[[nodiscard]] QRect geometry() const { return this->mGeometry; }
 	[[nodiscard]] qint32 desktop() const { return this->mDesktop; }
+	[[nodiscard]] bool urgent() const { return this->mUrgent; }
+	void setUrgent(bool urgent) {
+		if (urgent == this->mUrgent) return;
+		this->mUrgent = urgent;
+		emit this->urgentChanged();
+	}
 	[[nodiscard]] QObject* hyprlandToplevel() const { return this->mHyprland; }
 	[[nodiscard]] QString address() const { return QString::number(this->mHwnd, 16); }
 
@@ -91,6 +99,7 @@ signals:
 	void fullscreenChanged();
 	void geometryChanged();
 	void desktopChanged();
+	void urgentChanged();
 	void closed();
 
 private:
@@ -107,6 +116,7 @@ private:
 	bool mFullscreen = false;
 	QRect mGeometry;
 	qint32 mDesktop = 0;
+	bool mUrgent = false;
 	QList<QuickshellScreenInfo*> mScreens;
 	QObject* mHyprland = nullptr;
 };
@@ -151,6 +161,8 @@ public:
 	void scheduleRefresh();
 	// A WinEvent about one window (plan 2026-10-31, D1).
 	void onEvent(quint32 event, quintptr hwnd);
+	// A window flashed its taskbar button (shell hook, plan 2026-10-31, F17); certain: HSHELL_FLASH itself.
+	void onFlash(quintptr hwnd, bool certain);
 
 signals:
 	void activeChanged();
@@ -183,6 +195,7 @@ private:
 		qint64 windowUpdates = 0;
 	} stats;
 	QTimer statsTimer;        // QS_TOPLEVELS_STATS=1: the counts in the log every 10 s (to measure D1)
+	void* shellHookWindow = nullptr; // HWND registered with RegisterShellHookWindow (F17)
 };
 
 } // namespace qs::win32

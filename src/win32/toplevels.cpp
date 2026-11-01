@@ -112,6 +112,21 @@ void CALLBACK onWinEvent(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, L
 	if (constructedTracker) constructedTracker->onEvent(event, reinterpret_cast<quintptr>(hwnd)); // NOLINT
 }
 
+// Shell hook messages (plan 2026-10-31, F17): Windows tells registered windows when an app flashes its taskbar
+// button (FlashWindowEx), which is how apps ask for attention (a message arrived, a download finished).
+UINT shellHookMessage = 0; // NOLINT
+LRESULT CALLBACK shellHookProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+	if (msg == shellHookMessage && shellHookMessage != 0 && constructedTracker) {
+		// HSHELL_FLASH (REDRAW + high bit) only reaches the taskman window (Explorer's taskbar); other listeners get
+		// the flash as a plain HSHELL_REDRAW, which also comes with title and icon changes: onFlash tells them apart.
+		if ((wParam & 0x7fff) == HSHELL_REDRAW) {
+			constructedTracker->onFlash(reinterpret_cast<quintptr>(reinterpret_cast<HWND>(lParam)), (wParam & 0x8000) != 0); // NOLINT
+		}
+		return 0;
+	}
+	return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
 } // namespace
 
 // WindowHandle
@@ -283,8 +298,42 @@ WindowTracker::WindowTracker(QObject* parent): QObject(parent) {
 		this->scheduleRefresh();
 	});
 
+	// Apps asking for attention (F17): a hidden window registered for the shell hook messages. Not message-only:
+	// those do not get the shell's notifications on every Windows build.
+	WNDCLASSW wc {};
+	wc.lpfnWndProc = shellHookProc;
+	wc.hInstance = GetModuleHandleW(nullptr);
+	wc.lpszClassName = L"QsShellHook";
+	RegisterClassW(&wc);
+	auto* hook = CreateWindowExW(WS_EX_TOOLWINDOW, wc.lpszClassName, L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, wc.hInstance, nullptr);
+	if (hook) {
+		shellHookMessage = RegisterWindowMessageW(L"SHELLHOOK");
+		if (RegisterShellHookWindow(hook)) {
+			this->shellHookWindow = hook;
+		}
+		else {
+			qWarning() << "toplevels: RegisterShellHookWindow failed" << GetLastError();
+			DestroyWindow(hook);
+		}
+	}
+
 	this->fullParts = WindowHandle::All;
 	this->refresh();
+}
+
+void WindowTracker::onFlash(quintptr hwnd, bool certain) {
+	auto* handle = this->byHwnd.value(hwnd);
+	// The window in front does not need to ask (some apps flash when they get the focus).
+	if (!handle || hwnd == reinterpret_cast<quintptr>(GetForegroundWindow())) return; // NOLINT
+	if (!certain) {
+		// A redraw that is a new title (its NAMECHANGE may not be handled yet): not a request for attention.
+		auto title = windowText(toHwnd(hwnd));
+		if (title != handle->title()) {
+			handle->update(WindowHandle::Title, reinterpret_cast<quintptr>(GetForegroundWindow())); // NOLINT
+			return;
+		}
+	}
+	handle->setUrgent(true);
 }
 
 void WindowTracker::scheduleRefresh() {
@@ -331,7 +380,10 @@ void WindowTracker::markDirty(quintptr hwnd, quint8 parts) {
 void WindowTracker::setForeground(quintptr hwnd) {
 	auto* now = this->byHwnd.value(hwnd);
 	if (this->mActive && this->mActive != now) this->mActive->update(WindowHandle::Activated, hwnd);
-	if (now) now->update(WindowHandle::Activated, hwnd);
+	if (now) {
+		now->update(WindowHandle::Activated, hwnd);
+		now->setUrgent(false); // seen: no longer asking
+	}
 	if (now != this->mActive) {
 		this->mActive = now;
 		emit this->activeChanged();
