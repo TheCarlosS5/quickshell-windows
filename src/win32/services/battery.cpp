@@ -50,6 +50,7 @@ BatterySnapshot report(Battery const& battery, bool aggregate) {
 	try {
 		if (!battery) throw winrt::hresult_error(E_NOTIMPL);
 		auto r = battery.GetReport();
+		if (!r) throw winrt::hresult_error(E_FAIL); // a battery being removed: S_OK and no report (plan 2026-10-31, A6)
 		bool present = r.Status() != BatteryStatus::NotPresent;
 		if (aggregate && systemKnown) present = !(status.BatteryFlag & 128);
 		auto state = UPowerDeviceState::Unknown;
