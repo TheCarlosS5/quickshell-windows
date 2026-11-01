@@ -4,6 +4,9 @@
 #include <qmetaobject.h>
 #include <qset.h>
 #include <qurl.h>
+#include <windows.h>
+#include <setupapi.h>
+#include <devpropdef.h>
 #include <winrt/Windows.Devices.Bluetooth.h>
 #include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
 #include <winrt/Windows.Devices.Enumeration.h>
@@ -22,6 +25,34 @@ template <typename T> QString enumName(int value) {
 	auto key = e.valueToKey(value); return key ? QString::fromLatin1(key) : QStringLiteral("Unknown");
 }
 void settings() { QDesktopServices::openUrl(QUrl(QStringLiteral("ms-settings:bluetooth"))); }
+
+// Plan 2026-10-31, E5: a device's battery, as Windows' Bluetooth settings show it: the byte property
+// {104EA319-6EE2-4701-BD47-8DDBF425BBE5},2 of one of its device nodes (on classic headsets the Hands-Free one), found
+// by the address in the node's instance id (BTHENUM\{...}\9&...&0&41420B1B038C_C00000000). -1 when none has it.
+int readBattery(const QString& address, bool presentOnly = true) {
+	auto mac = QString(address).remove(QLatin1Char(':')).remove(QLatin1Char('-')).toUpper();
+	if (mac.size() != 12) return -1;
+	static const DEVPROPKEY key {{0x104EA319, 0x6EE2, 0x4701, {0xBD, 0x47, 0x8D, 0xDB, 0xF4, 0x25, 0xBB, 0xE5}}, 2};
+	int found = -1;
+	for (const wchar_t* enumerator: {L"BTHENUM", L"BTHLE", L"BTHLEDEVICE"}) {
+		auto* set = SetupDiGetClassDevsW(nullptr, enumerator, nullptr, DIGCF_ALLCLASSES | (presentOnly ? DIGCF_PRESENT : 0));
+		if (set == INVALID_HANDLE_VALUE) continue;
+		SP_DEVINFO_DATA info {};
+		info.cbSize = sizeof(info);
+		for (DWORD i = 0; found < 0 && SetupDiEnumDeviceInfo(set, i, &info); ++i) {
+			wchar_t instance[512] {};
+			if (!SetupDiGetDeviceInstanceIdW(set, &info, instance, 512, nullptr)) continue;
+			if (!QString::fromWCharArray(instance).toUpper().contains(mac)) continue;
+			DEVPROPTYPE type = 0;
+			BYTE value = 0;
+			if (SetupDiGetDevicePropertyW(set, &info, &key, &type, &value, sizeof(value), nullptr, 0) && type == DEVPROP_TYPE_BYTE && value <= 100)
+				found = value;
+		}
+		SetupDiDestroyDeviceInfoList(set);
+		if (found >= 0) break;
+	}
+	return found;
+}
 BluetoothAdapterState::Enum radioState(Radio const& radio) {
 	if (radio.State() == RadioState::On) return BluetoothAdapterState::Enabled;
 	if (radio.State() == RadioState::Disabled) return BluetoothAdapterState::Blocked;
@@ -122,7 +153,31 @@ BluetoothDevice::BluetoothDevice(QString id, BluetoothAdapter* adapter): QObject
 		try { runtime->releaseConnection(); } catch (const winrt::hresult_error&) {}
 		mConnecting = false; error = QStringLiteral("Bluetooth LE connection timed out"); emit changed();
 	});
+	// The battery: read a moment after it connects (Windows fills the property then), then once a minute.
+	batteryTimer.setInterval(60000);
+	QObject::connect(&batteryTimer, &QTimer::timeout, this, &BluetoothDevice::refreshBattery);
+	QObject::connect(this, &BluetoothDevice::changed, this, [this] {
+		if (mConnected == batteryWatched) return;
+		batteryWatched = mConnected;
+		if (mConnected) {
+			QTimer::singleShot(3000, this, &BluetoothDevice::refreshBattery);
+			batteryTimer.start();
+		} else {
+			batteryTimer.stop();
+			refreshBattery();
+		}
+	});
 }
+int readDeviceBattery(const QString& address, bool presentOnly) { return readBattery(address, presentOnly); }
+
+void BluetoothDevice::refreshBattery() {
+	auto value = mConnected ? readBattery(mAddress) : -1;
+	if (value != mBattery) {
+		mBattery = value;
+		emit changed();
+	}
+}
+
 BluetoothDevice::~BluetoothDevice() {
 	runtime->delivery->close();
 	try {

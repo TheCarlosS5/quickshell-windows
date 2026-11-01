@@ -33,6 +33,8 @@ public:
 	Q_ENUM(Enum)
 	Q_INVOKABLE static QString toString(Enum value);
 };
+// The battery percentage Windows knows for the device with this address ("41:42:0b:1b:03:8c"), -1 if none (E5).
+int readDeviceBattery(const QString& address, bool presentOnly = true);
 class BluetoothAdapter;
 class BluetoothDevice: public QObject {
 	Q_OBJECT
@@ -49,8 +51,9 @@ class BluetoothDevice: public QObject {
 	Q_PROPERTY(bool pairing READ pairing NOTIFY changed)
 	Q_PROPERTY(bool blocked READ falseValue WRITE setBlocked NOTIFY changed)
 	Q_PROPERTY(bool wakeAllowed READ falseValue WRITE setWakeAllowed NOTIFY changed)
-	Q_PROPERTY(bool batteryAvailable READ falseValue CONSTANT)
-	Q_PROPERTY(qreal battery READ battery CONSTANT)
+	// Plan 2026-10-31, E5: the battery Windows' Bluetooth settings show (a device node property), while connected.
+	Q_PROPERTY(bool batteryAvailable READ batteryAvailable NOTIFY changed)
+	Q_PROPERTY(qreal battery READ battery NOTIFY changed)
 	Q_PROPERTY(qs::win32::bluetooth::BluetoothDeviceState::Enum state READ state NOTIFY changed)
 	Q_PROPERTY(qs::win32::bluetooth::BluetoothAdapter* adapter READ adapter NOTIFY changed)
 	Q_PROPERTY(QString dbusPath READ id CONSTANT)
@@ -74,7 +77,9 @@ public:
 	void setTrusted(bool value);
 	void setBlocked(bool value);
 	void setWakeAllowed(bool value);
-	qreal battery() const { return 0; }
+	bool batteryAvailable() const { return mBattery >= 0; }
+	qreal battery() const { return mBattery >= 0 ? mBattery / 100.0 : 0; }
+	void refreshBattery();
 	BluetoothDeviceState::Enum state() const { return mConnected ? BluetoothDeviceState::Connected : mConnecting ? BluetoothDeviceState::Connecting : BluetoothDeviceState::Disconnected; }
 	BluetoothAdapter* adapter() const { return mAdapter; }
 	QString lastError() const { return error; }
@@ -89,7 +94,9 @@ private:
 	friend class Bluetooth;
 	QString mId, mName, mAddress, alias, mIcon = "bluetooth", error;
 	BluetoothAdapter* mAdapter;
-	bool mConnected = false, mPaired = false, mPairing = false, mConnecting = false;
+	bool mConnected = false, mPaired = false, mPairing = false, mConnecting = false, batteryWatched = false;
+	int mBattery = -1;
+	QTimer batteryTimer;
 };
 class BluetoothAdapter: public QObject {
 	Q_OBJECT

@@ -119,14 +119,14 @@ qt_add_qml_module(quickshell-win32-bluetooth URI Quickshell.Bluetooth VERSION 0.
 target_include_directories(quickshell-win32-bluetooth PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/services)
 install_qml_module(quickshell-win32-bluetooth)
 target_compile_options(quickshell-win32-bluetooth PRIVATE /EHsc)
-target_link_libraries(quickshell-win32-bluetooth PRIVATE Qt::Quick windowsapp)
+target_link_libraries(quickshell-win32-bluetooth PRIVATE Qt::Quick windowsapp setupapi)
 target_link_libraries(quickshell PRIVATE quickshell-win32-bluetoothplugin)
 
 # Separate console executable; never boots Quickshell or a QGuiApplication.
 qt_add_executable(ii-hardware-test services/hardware_test.cpp services/battery.cpp services/battery.hpp
 	services/bluetooth.cpp services/bluetooth.hpp ../core/model.cpp ../core/model.hpp)
 target_compile_options(ii-hardware-test PRIVATE /EHsc)
-target_link_libraries(ii-hardware-test PRIVATE Qt::Quick windowsapp powrprof)
+target_link_libraries(ii-hardware-test PRIVATE Qt::Quick windowsapp powrprof setupapi)
 
 # Test tool (plan 2026-10-31, A8): creates and drops silent media sessions like a browser feed, to stress the MPRIS
 # backend. No Qt.

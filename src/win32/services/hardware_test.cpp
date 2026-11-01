@@ -19,6 +19,11 @@ int main(int argc, char** argv) {
 	QCoreApplication app(argc, argv);
 	winrt::init_apartment(winrt::apartment_type::multi_threaded);
 	struct Apartment { ~Apartment() { winrt::uninit_apartment(); } } apartment;
+	// bt-battery <address>: what readDeviceBattery finds, also on nodes not present now (plan 2026-10-31, E5).
+	if (app.arguments().size() == 3 && app.arguments()[1] == "bt-battery") {
+		std::printf("%d\n", qs::win32::bluetooth::readDeviceBattery(app.arguments()[2], false));
+		return 0;
+	}
 	if (app.arguments() != QStringList {app.arguments().first(), "--read-only"}) return 2;
 	using namespace qs::win32::power;
 	int failures = 0;
