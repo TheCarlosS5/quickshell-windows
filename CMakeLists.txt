@@ -90,6 +90,19 @@ if (WIN32)
 	# clang-cl: keep GNU extensions quickshell relies on (VLAs, statement expressions)
 	add_compile_options(-Wno-vla-cxx-extension -Wno-gnu-statement-expression-from-macro-expansion /utf-8)
 	add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+	# ii-windows plan 2026-10-31, A3.2: no paths of the building machine inside the exe (__FILE__ in Qt's messages,
+	# C++/WinRT's source_location), and a PDB for every release build so a crash offset can be read later.
+	# /OPT:REF /OPT:ICF keep the binary as small and as optimized as without /DEBUG; /PDBALTPATH stores only the
+	# PDB's file name in the exe. The PDBs are shipped apart (make-package.ps1: ...-symbols.zip), never installed.
+	add_compile_options("/clang:-fmacro-prefix-map=${CMAKE_SOURCE_DIR}=quickshell")
+	add_compile_definitions(WINRT_NO_SOURCE_LOCATION)
+	if (CMAKE_BUILD_TYPE STREQUAL "Release")
+		add_compile_options(/Zi)
+		add_link_options(/DEBUG:FULL /OPT:REF /OPT:ICF)
+	endif()
+	if (CMAKE_BUILD_TYPE MATCHES "Release|RelWithDebInfo")
+		add_link_options("/PDBALTPATH:%_PDB%")
+	endif()
 else()
 	add_compile_options(-Wall -Wextra -Wno-vla-cxx-extension)
 
