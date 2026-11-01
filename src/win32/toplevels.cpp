@@ -1,5 +1,6 @@
 #include "toplevels.hpp"
 #include <array>
+#include <utility>
 
 #include <qfileinfo.h>
 #include <qguiapplication.h>
@@ -93,9 +94,15 @@ QuickshellScreenInfo* screenOf(HWND hwnd) {
 // at start-up now and then (seen on a stack dump: _Init_thread_header under WindowTracker::refresh).
 WindowTracker* constructedTracker = nullptr; // NOLINT
 
+// Not one of WindowHandle::Part: "check whether it is (still) an app window".
+constexpr quint8 MEMBERSHIP = 32;
+
 void CALLBACK onWinEvent(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD, DWORD) {
 	if (idObject != OBJID_WINDOW || idChild != CHILDID_SELF) return;
-	if (event == EVENT_OBJECT_LOCATIONCHANGE && (!hwnd || GetAncestor(hwnd, GA_ROOT) != hwnd)) return;
+	// Only top-level windows matter (a destroyed one has no ancestor any more: let it through).
+	if (event != EVENT_SYSTEM_FOREGROUND && event != EVENT_OBJECT_DESTROY
+	    && (!hwnd || GetAncestor(hwnd, GA_ROOT) != hwnd))
+		return;
 	// Our own windows (the dock's previews, the bar's popups, the overview...) are never tracked, but each
 	// one that appeared, hid or moved used to start a full re-scan of every window: a stall on the main
 	// thread every time a popup opened. Only the foreground change is still needed (who is in front).
@@ -105,7 +112,7 @@ void CALLBACK onWinEvent(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, L
 		GetWindowThreadProcessId(hwnd, &pid);
 		if (pid == ownPid) return;
 	}
-	if (constructedTracker) constructedTracker->scheduleRefresh();
+	if (constructedTracker) constructedTracker->onEvent(event, reinterpret_cast<quintptr>(hwnd)); // NOLINT
 }
 
 } // namespace
@@ -125,48 +132,57 @@ HyprlandToplevelInfo::HyprlandToplevelInfo(WindowHandle* handle): QObject(handle
 	QObject::connect(handle, &WindowHandle::activatedChanged, this, &HyprlandToplevelInfo::activatedChanged);
 }
 
-bool WindowHandle::refresh(quintptr foreground) {
+void WindowHandle::update(quint8 parts, quintptr foreground) {
 	auto* h = toHwnd(this->mHwnd);
-	if (!IsWindow(h) || !WindowTracker::isAppWindow(this->mHwnd)) return false;
 
-	auto desktop = static_cast<qint32>(VirtualDesktops::instance()->desktopOf(this->mHwnd));
-	if (desktop != this->mDesktop) {
-		this->mDesktop = desktop;
-		emit this->desktopChanged();
-	}
-
-	auto title = windowText(h);
-	if (title != this->mTitle) {
-		this->mTitle = title;
-		emit this->titleChanged();
-	}
-
-	// Prefer the AppUserModelID (what the taskbar groups by); fall back to the exe name,
-	// which is what most desktop-entry style lookups expect.
-	auto appId = appUserModelId(h);
-	if (appId.isEmpty()) {
-		// OpenProcess + GetApplicationUserModelId on every refresh of every window was a good part of the
-		// stalls: the process' id is the same for its whole life.
-		if (!this->mPackagedIdKnown) {
-			this->mPackagedId = packagedAppUserModelId(static_cast<DWORD>(this->mPid));
-			this->mPackagedIdKnown = true;
+	if (parts & Desktop) {
+		auto desktop = static_cast<qint32>(VirtualDesktops::instance()->desktopOf(this->mHwnd));
+		if (desktop != this->mDesktop) {
+			this->mDesktop = desktop;
+			emit this->desktopChanged();
 		}
-		appId = this->mPackagedId;
-	}
-	if (appId.isEmpty()) appId = QFileInfo(this->mExecutable).completeBaseName();
-	// File Explorer windows carry no id of their own; the Start menu (and the dock pin) knows
-	// Explorer by this one.
-	if (appId.compare("explorer", Qt::CaseInsensitive) == 0) appId = "Microsoft.Windows.Explorer";
-	if (appId != this->mAppId) {
-		this->mAppId = appId;
-		emit this->appIdChanged();
 	}
 
-	auto activated = foreground == this->mHwnd;
-	if (activated != this->mActivated) {
-		this->mActivated = activated;
-		emit this->activatedChanged();
+	if (parts & Title) {
+		auto title = windowText(h);
+		if (title != this->mTitle) {
+			this->mTitle = title;
+			emit this->titleChanged();
+		}
 	}
+
+	if (parts & AppId) {
+		// Prefer the AppUserModelID (what the taskbar groups by); fall back to the exe name,
+		// which is what most desktop-entry style lookups expect.
+		auto appId = appUserModelId(h);
+		if (appId.isEmpty()) {
+			// OpenProcess + GetApplicationUserModelId on every refresh of every window was a good part of the
+			// stalls: the process' id is the same for its whole life.
+			if (!this->mPackagedIdKnown) {
+				this->mPackagedId = packagedAppUserModelId(static_cast<DWORD>(this->mPid));
+				this->mPackagedIdKnown = true;
+			}
+			appId = this->mPackagedId;
+		}
+		if (appId.isEmpty()) appId = QFileInfo(this->mExecutable).completeBaseName();
+		// File Explorer windows carry no id of their own; the Start menu (and the dock pin) knows
+		// Explorer by this one.
+		if (appId.compare("explorer", Qt::CaseInsensitive) == 0) appId = "Microsoft.Windows.Explorer";
+		if (appId != this->mAppId) {
+			this->mAppId = appId;
+			emit this->appIdChanged();
+		}
+	}
+
+	if (parts & Activated) {
+		auto activated = foreground == this->mHwnd;
+		if (activated != this->mActivated) {
+			this->mActivated = activated;
+			emit this->activatedChanged();
+		}
+	}
+
+	if (!(parts & State)) return;
 
 	auto minimized = IsIconic(h) != FALSE;
 	if (minimized != this->mMinimized) {
@@ -206,8 +222,6 @@ bool WindowHandle::refresh(quintptr foreground) {
 		this->mScreens = screens;
 		emit this->screensChanged();
 	}
-
-	return true;
 }
 
 void WindowHandle::activate() { WindowTracker::forceForeground(this->mHwnd); }
@@ -236,9 +250,26 @@ WindowTracker* WindowTracker::instance() {
 }
 
 WindowTracker::WindowTracker(QObject* parent): QObject(parent) {
+	// Plan 2026-10-31, D1: a WinEvent re-reads only the window it is about (pendingTimer); the full scan is the
+	// safety net, at most once a second after an event that may have missed something, and every 10 s.
 	this->debounce.setSingleShot(true);
-	this->debounce.setInterval(40);
+	this->debounce.setInterval(1000);
 	QObject::connect(&this->debounce, &QTimer::timeout, this, &WindowTracker::refresh);
+	this->pendingTimer.setSingleShot(true);
+	this->pendingTimer.setInterval(50);
+	QObject::connect(&this->pendingTimer, &QTimer::timeout, this, &WindowTracker::processPending);
+	this->periodic.setInterval(10000);
+	QObject::connect(&this->periodic, &QTimer::timeout, this, [this]() {
+		// Every third one (30 s) also re-reads what has no event of its own: app ids, and desktops as a check.
+		if (++this->periodicCount % 3 == 0) this->fullParts |= WindowHandle::AppId | WindowHandle::Desktop;
+		this->refresh();
+	});
+	this->periodic.start();
+	if (qEnvironmentVariableIntValue("QS_TOPLEVELS_STATS") == 1) {
+		this->statsTimer.setInterval(10000);
+		QObject::connect(&this->statsTimer, &QTimer::timeout, this, &WindowTracker::logStats);
+		this->statsTimer.start();
+	}
 	constructedTracker = this;
 
 	// Out-of-context hooks: callbacks arrive on this thread's message loop, nothing is injected.
@@ -247,14 +278,126 @@ WindowTracker::WindowTracker(QObject* parent): QObject(parent) {
 	SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, nullptr, onWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
 	SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_NAMECHANGE, nullptr, onWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
 	SetWinEventHook(EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED, nullptr, onWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
-	// Desktops created, closed or switched: windows' desktop indexes change.
-	QObject::connect(VirtualDesktops::instance(), &VirtualDesktops::changed, this, &WindowTracker::scheduleRefresh);
+	// Desktops created, closed or switched: windows' desktop indexes change (each window, right away), and a
+	// full scan after it (windows that only now count).
+	QObject::connect(VirtualDesktops::instance(), &VirtualDesktops::changed, this, [this]() {
+		for (auto it = this->byHwnd.cbegin(); it != this->byHwnd.cend(); ++it)
+			this->markDirty(it.key(), MEMBERSHIP | WindowHandle::Desktop | WindowHandle::State);
+		this->scheduleRefresh();
+	});
 
+	this->fullParts = WindowHandle::All;
 	this->refresh();
 }
 
 void WindowTracker::scheduleRefresh() {
 	if (!this->debounce.isActive()) this->debounce.start();
+}
+
+void WindowTracker::onEvent(quint32 event, quintptr hwnd) {
+	this->stats.events += 1;
+	if (event == EVENT_SYSTEM_FOREGROUND) {
+		this->setForeground(hwnd);
+		return;
+	}
+	if (!hwnd) {
+		this->scheduleRefresh();
+		return;
+	}
+	auto tracked = this->byHwnd.contains(hwnd);
+	switch (event) {
+	case EVENT_OBJECT_NAMECHANGE:
+		// A tracked window's title; another window may count once it has one.
+		this->markDirty(hwnd, tracked ? WindowHandle::Title : MEMBERSHIP);
+		break;
+	case EVENT_OBJECT_LOCATIONCHANGE:
+	case EVENT_SYSTEM_MINIMIZESTART:
+	case EVENT_SYSTEM_MINIMIZEEND:
+		if (tracked) this->markDirty(hwnd, WindowHandle::State);
+		break;
+	case EVENT_OBJECT_CLOAKED:
+	case EVENT_OBJECT_UNCLOAKED:
+		// Also what a window moved to another desktop gets.
+		this->markDirty(hwnd, MEMBERSHIP | WindowHandle::Desktop | WindowHandle::State);
+		break;
+	default: // CREATE, DESTROY, SHOW, HIDE
+		this->markDirty(hwnd, MEMBERSHIP | WindowHandle::State | WindowHandle::Title);
+		break;
+	}
+}
+
+void WindowTracker::markDirty(quintptr hwnd, quint8 parts) {
+	this->pending[hwnd] |= parts;
+	if (!this->pendingTimer.isActive()) this->pendingTimer.start();
+}
+
+void WindowTracker::setForeground(quintptr hwnd) {
+	auto* now = this->byHwnd.value(hwnd);
+	if (this->mActive && this->mActive != now) this->mActive->update(WindowHandle::Activated, hwnd);
+	if (now) now->update(WindowHandle::Activated, hwnd);
+	if (now != this->mActive) {
+		this->mActive = now;
+		emit this->activeChanged();
+	}
+	// A window not known yet coming to the front: maybe a new one.
+	if (!now && hwnd) {
+		static const DWORD ownPid = GetCurrentProcessId();
+		DWORD pid = 0;
+		GetWindowThreadProcessId(toHwnd(hwnd), &pid);
+		if (pid != ownPid) this->markDirty(hwnd, MEMBERSHIP | WindowHandle::State | WindowHandle::Title);
+	}
+}
+
+void WindowTracker::addWindow(quintptr hwnd, quintptr foreground) {
+	auto* handle = new WindowHandle(hwnd, this);
+	handle->update(WindowHandle::All, foreground);
+	this->byHwnd.insert(hwnd, handle);
+	this->mWindows.insertObject(handle);
+}
+
+void WindowTracker::removeWindow(WindowHandle* handle) {
+	this->byHwnd.remove(static_cast<quintptr>(handle->hwnd()));
+	this->mWindows.removeObject(handle);
+	emit handle->closed();
+	handle->deleteLater();
+}
+
+void WindowTracker::processPending() {
+	crash::ScopedSubsystem subsystem("toplevels");
+	auto pending = std::exchange(this->pending, {});
+	auto foreground = reinterpret_cast<quintptr>(GetForegroundWindow()); // NOLINT
+	auto changed = false;
+	for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
+		auto hwnd = it.key();
+		auto parts = it.value();
+		auto* handle = this->byHwnd.value(hwnd);
+		auto counts = !(parts & MEMBERSHIP) || (IsWindow(toHwnd(hwnd)) && WindowTracker::isAppWindow(hwnd));
+		this->stats.windowUpdates += 1;
+		if (handle && !counts) {
+			this->removeWindow(handle);
+			changed = true;
+		} else if (handle) {
+			handle->update(parts & WindowHandle::All, foreground);
+		} else if (counts && (parts & MEMBERSHIP)) {
+			this->addWindow(hwnd, foreground);
+			changed = true;
+		}
+	}
+	auto* active = this->byHwnd.value(foreground);
+	if (active != this->mActive) {
+		if (this->mActive) this->mActive->update(WindowHandle::Activated, foreground);
+		if (active) active->update(WindowHandle::Activated, foreground);
+		this->mActive = active;
+		emit this->activeChanged();
+	}
+	if (changed) emit this->windowsChanged();
+}
+
+void WindowTracker::logStats() {
+	qInfo().nospace() << "toplevels: " << this->stats.events << " events, " << this->stats.windowUpdates
+	                  << " window updates, " << this->stats.fullScans << " full scans, " << this->byHwnd.size()
+	                  << " windows (last 10 s)";
+	this->stats = {};
 }
 
 bool WindowTracker::isAppWindow(quintptr handle) {
@@ -334,6 +477,8 @@ void WindowTracker::forceForeground(quintptr handle) {
 
 void WindowTracker::refresh() {
 	crash::ScopedSubsystem subsystem("toplevels");
+	this->stats.fullScans += 1;
+	auto parts = std::exchange(this->fullParts, WindowHandle::Title | WindowHandle::State | WindowHandle::Activated);
 	QList<quintptr> found;
 	EnumWindows(
 	    [](HWND hwnd, LPARAM data) -> BOOL {
@@ -348,16 +493,17 @@ void WindowTracker::refresh() {
 	auto foreground = reinterpret_cast<quintptr>(GetForegroundWindow());
 	auto changed = false;
 
-	// removals
+	// removals (found only lists app windows: isAppWindow ran for each)
 	for (auto it = this->byHwnd.begin(); it != this->byHwnd.end();) {
 		auto* handle = it.value();
-		if (!found.contains(it.key()) || !handle->refresh(foreground)) {
+		if (!found.contains(it.key())) {
 			this->mWindows.removeObject(handle);
 			emit handle->closed();
 			handle->deleteLater();
 			it = this->byHwnd.erase(it);
 			changed = true;
 		} else {
+			handle->update(parts, foreground);
 			++it;
 		}
 	}
@@ -365,13 +511,7 @@ void WindowTracker::refresh() {
 	// additions (in z-order, so the first seen is the most recently used)
 	for (auto hwnd: found) {
 		if (this->byHwnd.contains(hwnd)) continue;
-		auto* handle = new WindowHandle(hwnd, this);
-		if (!handle->refresh(foreground)) {
-			delete handle;
-			continue;
-		}
-		this->byHwnd.insert(hwnd, handle);
-		this->mWindows.insertObject(handle);
+		this->addWindow(hwnd, foreground);
 		changed = true;
 	}
 

@@ -69,8 +69,17 @@ public:
 	Q_INVOKABLE void setRectangle(QObject* window, QRect rect);
 	Q_INVOKABLE void unsetRectangle();
 
-	// Re-reads state from the window; returns false if it no longer qualifies.
-	bool refresh(quintptr foreground);
+	// What to read again (plan 2026-10-31, D1: one window's change re-reads only that window, and only what changed).
+	enum Part : quint8 {
+		Title = 1,
+		State = 2,   // minimized, maximized, geometry, fullscreen, screen
+		Desktop = 4, // virtual desktop: a call to Explorer, so only when desktops or the window's cloaking change
+		AppId = 8,   // AppUserModelID: a property store read, rarely changes
+		Activated = 16,
+		All = 31,
+	};
+	// Re-reads parts of the window's state (it is still an app window: the tracker checked).
+	void update(quint8 parts, quintptr foreground);
 
 signals:
 	void appIdChanged();
@@ -138,7 +147,10 @@ public:
 	// Brings a window to the foreground even when another process owns the foreground.
 	static void forceForeground(quintptr hwnd);
 
+	// A full scan of every window soon (the safety net; events are handled window by window).
 	void scheduleRefresh();
+	// A WinEvent about one window (plan 2026-10-31, D1).
+	void onEvent(quint32 event, quintptr hwnd);
 
 signals:
 	void activeChanged();
@@ -146,14 +158,31 @@ signals:
 
 private slots:
 	void refresh();
+	void processPending();
+	void logStats();
 
 private:
 	explicit WindowTracker(QObject* parent = nullptr);
+	void markDirty(quintptr hwnd, quint8 parts);
+	void setForeground(quintptr hwnd);
+	void addWindow(quintptr hwnd, quintptr foreground);
+	void removeWindow(WindowHandle* handle);
 
 	ObjectModel<WindowHandle> mWindows {this};
 	QHash<quintptr, WindowHandle*> byHwnd;
 	QPointer<WindowHandle> mActive;
-	QTimer debounce;
+	QTimer debounce;          // full scan after structural events, at most one a second
+	QTimer pendingTimer;      // the windows with changes, together every 50 ms
+	QTimer periodic;          // full scan every 10 s; every third one also re-reads app ids and desktops
+	QHash<quintptr, quint8> pending; // hwnd -> parts to re-read; Membership: check whether it is (still) an app window
+	quint8 fullParts = WindowHandle::Title | WindowHandle::State | WindowHandle::Activated;
+	int periodicCount = 0;
+	struct {
+		qint64 events = 0;
+		qint64 fullScans = 0;
+		qint64 windowUpdates = 0;
+	} stats;
+	QTimer statsTimer;        // QS_TOPLEVELS_STATS=1: the counts in the log every 10 s (to measure D1)
 };
 
 } // namespace qs::win32
