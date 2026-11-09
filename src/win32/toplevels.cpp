@@ -297,6 +297,11 @@ WindowTracker::WindowTracker(QObject* parent): QObject(parent) {
 			this->markDirty(it.key(), MEMBERSHIP | WindowHandle::Desktop | WindowHandle::State);
 		this->scheduleRefresh();
 	});
+	QObject::connect(VirtualDesktops::instance(), &VirtualDesktops::windowDesktopChanged, this, [this](quintptr hwnd) {
+		if (auto* handle = this->byHwnd.value(hwnd))
+			handle->update(WindowHandle::Desktop, reinterpret_cast<quintptr>(GetForegroundWindow())); // NOLINT
+		this->markDirty(hwnd, MEMBERSHIP | WindowHandle::State);
+	});
 
 	// Apps asking for attention (F17): a hidden window registered for the shell hook messages. Not message-only:
 	// those do not get the shell's notifications on every Windows build.
@@ -343,6 +348,7 @@ void WindowTracker::scheduleRefresh() {
 }
 
 void WindowTracker::onEvent(quint32 event, quintptr hwnd) {
+	if (event == EVENT_OBJECT_DESTROY) VirtualDesktops::instance()->forgetWindow(hwnd);
 	this->stats.events += 1;
 	if (event == EVENT_SYSTEM_FOREGROUND) {
 		this->setForeground(hwnd);
@@ -376,6 +382,7 @@ void WindowTracker::onEvent(quint32 event, quintptr hwnd) {
 }
 
 void WindowTracker::markDirty(quintptr hwnd, quint8 parts) {
+	if (parts & WindowHandle::Desktop) VirtualDesktops::instance()->requestWindow(hwnd);
 	this->pending[hwnd] |= parts;
 	if (!this->pendingTimer.isActive()) this->pendingTimer.start();
 }
@@ -401,6 +408,7 @@ void WindowTracker::setForeground(quintptr hwnd) {
 }
 
 void WindowTracker::addWindow(quintptr hwnd, quintptr foreground) {
+	VirtualDesktops::instance()->requestWindow(hwnd);
 	auto* handle = new WindowHandle(hwnd, this);
 	handle->update(WindowHandle::All, foreground);
 	this->byHwnd.insert(hwnd, handle);
@@ -532,6 +540,8 @@ void WindowTracker::refresh() {
 	crash::ScopedSubsystem subsystem("toplevels");
 	this->stats.fullScans += 1;
 	auto parts = std::exchange(this->fullParts, WindowHandle::Title | WindowHandle::State | WindowHandle::Activated);
+	if (parts & WindowHandle::Desktop)
+		VirtualDesktops::instance()->refreshWindowCache();
 	QList<quintptr> found;
 	EnumWindows(
 	    [](HWND hwnd, LPARAM data) -> BOOL {

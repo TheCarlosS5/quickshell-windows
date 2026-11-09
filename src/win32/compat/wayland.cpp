@@ -110,7 +110,11 @@ void ScreencopyView::scheduleThumbnailUpdate() {
 	QMetaObject::invokeMethod(this, &ScreencopyView::updateThumbnail, Qt::QueuedConnection);
 }
 
-ScreencopyView::~ScreencopyView() { this->unregisterThumbnail(); }
+ScreencopyView::~ScreencopyView() {
+	if (qEnvironmentVariableIntValue("QS_THUMBNAIL_STATS") == 1)
+		qInfo() << "thumbnail updates: submitted" << this->submittedUpdates << "unchanged" << this->unchangedUpdates;
+	this->unregisterThumbnail();
+}
 
 void ScreencopyView::setCaptureSource(QObject* source) {
 	if (source == this->mSource) return;
@@ -194,6 +198,7 @@ void ScreencopyView::registerThumbnail() {
 }
 
 void ScreencopyView::unregisterThumbnail() {
+	this->propertiesValid = false;
 	if (!this->thumbnail) return;
 	DwmUnregisterThumbnail(reinterpret_cast<HTHUMBNAIL>(this->thumbnail)); // NOLINT
 	this->thumbnail = 0;
@@ -263,9 +268,23 @@ void ScreencopyView::updateThumbnail() {
 		props.fSourceClientAreaOnly = FALSE;
 		props.rcSource = RECT {0, 0, this->mSourceSize.width(), this->mSourceSize.height()};
 	}
-	auto hr = DwmUpdateThumbnailProperties(reinterpret_cast<HTHUMBNAIL>(this->thumbnail), &props); // NOLINT
 	auto rect = QRect(QPoint(props.rcDestination.left, props.rcDestination.top), QPoint(props.rcDestination.right, props.rcDestination.bottom));
-	if (rect != this->lastRect || (props.fVisible != 0) != this->lastVisible || props.opacity != this->lastOpacity) {
+	auto sourceRect = QRect(QPoint(props.rcSource.left, props.rcSource.top), QPoint(props.rcSource.right, props.rcSource.bottom));
+	// DWM keeps compositing a registered thumbnail without resubmitting identical properties.
+	// Keep the polling/render hooks for ancestor transforms and native popup visibility.
+	if (this->propertiesValid && rect == this->lastRect && sourceRect == this->lastSourceRect
+	    && props.dwFlags == this->lastFlags && (props.fSourceClientAreaOnly != 0) == this->lastClientOnly
+	    && (props.fVisible != 0) == this->lastVisible && props.opacity == this->lastOpacity) {
+		++this->unchangedUpdates;
+		return;
+	}
+	++this->submittedUpdates;
+	auto hr = DwmUpdateThumbnailProperties(reinterpret_cast<HTHUMBNAIL>(this->thumbnail), &props); // NOLINT
+	if (SUCCEEDED(hr)) {
+		this->propertiesValid = true;
+		this->lastSourceRect = sourceRect;
+		this->lastFlags = props.dwFlags;
+		this->lastClientOnly = props.fSourceClientAreaOnly != 0;
 		this->lastOpacity = props.opacity;
 		qCDebug(logCompat) << "thumbnail" << Qt::hex << this->thumbnail << Qt::dec << "rect" << rect << "visible" << props.fVisible << "opacity" << props.opacity << "hr" << Qt::hex << static_cast<quint32>(hr);
 		this->lastRect = rect;

@@ -179,6 +179,12 @@ private:
 	QPointer<QQuickWindow> trackedWindow;
 	QTimer poll;
 	QRect lastRect;
+	QRect lastSourceRect;
+	quint32 lastFlags = 0;
+	bool lastClientOnly = false;
+	bool propertiesValid = false;
+	quint64 submittedUpdates = 0;
+	quint64 unchangedUpdates = 0;
 	bool settled = false; // laid out at least once since the thumbnail was registered
 	bool lastVisible = false;
 	quint8 lastOpacity = 0;

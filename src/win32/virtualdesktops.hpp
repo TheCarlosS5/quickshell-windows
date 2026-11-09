@@ -4,6 +4,8 @@
 
 #include <qelapsedtimer.h>
 #include <qlist.h>
+#include <qhash.h>
+#include <qset.h>
 #include <qobject.h>
 #include <qstringlist.h>
 #include <qtimer.h>
@@ -36,7 +38,10 @@ public:
 	// Index of the desktop the window is on, -1 if unknown (e.g. pinned to all desktops).
 	[[nodiscard]] qsizetype desktopOf(quintptr hwnd) const;
 	// The window is on a desktop other than the current one (Windows cloaks those).
-	[[nodiscard]] bool onOtherDesktop(quintptr hwnd) const;
+	[[nodiscard]] bool onOtherDesktop(quintptr hwnd);
+	void requestWindow(quintptr hwnd);
+	void forgetWindow(quintptr hwnd);
+	void refreshWindowCache();
 
 	void switchTo(qsizetype index);
 	void create();
@@ -63,6 +68,7 @@ public:
 
 signals:
 	void changed();
+	void windowDesktopChanged(quintptr hwnd);
 
 private:
 	enum class Op { Switch, Remove, Move, Count };
@@ -71,11 +77,20 @@ private:
 	void watch();
 	void step();
 	void clear();
+	void queryPendingWindows();
 
 	QList<QUuid> ids;
 	QStringList names;
 	qsizetype mCurrent = 0;
-	void* manager = nullptr; // IVirtualDesktopManager*
+	// Only this worker calls Explorer's COM interface. Reads on the GUI thread use the last valid answer.
+	QObject* queryWorker = nullptr;
+	QTimer queryTimer;
+	QSet<quintptr> pendingWindows;
+	bool queryInFlight = false;
+	quint64 desktopRevision = 0;
+	quint64 nextWindowToken = 0;
+	struct CachedDesktop { QUuid id; bool onCurrent = true; quint32 pid = 0; quint64 token = 0; QUuid queriedCurrent; };
+	QHash<quintptr, CachedDesktop> windowCache;
 	void* key = nullptr;     // HKEY
 	void* event = nullptr;   // HANDLE
 	QWinEventNotifier* notifier = nullptr;

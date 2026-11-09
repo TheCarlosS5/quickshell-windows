@@ -3,11 +3,13 @@
 #include <functional>
 #include <cstring>
 #include <vector>
+#include <utility>
 
 #include <qelapsedtimer.h>
 #include <qlogging.h>
 #include <qloggingcategory.h>
 #include <qprocess.h>
+#include <qthread.h>
 #include <qwineventnotifier.h>
 
 #include <windows.h>
@@ -77,14 +79,14 @@ VirtualDesktops* VirtualDesktops::instance() {
 }
 
 VirtualDesktops::VirtualDesktops(QObject* parent): QObject(parent) {
-	// CLSID_VirtualDesktopManager (shobjidl_core.h only declares it for newer target versions).
-	constexpr CLSID clsid {0xaa509086, 0x5ca9, 0x4c25, {0x8f, 0x95, 0x58, 0x9d, 0x3c, 0x07, 0xb4, 0x8a}};
-	IVirtualDesktopManager* manager = nullptr;
-	if (SUCCEEDED(CoCreateInstance(clsid, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&manager)))) {
-		this->manager = manager;
-	} else {
-		qCWarning(logDesktops) << "IVirtualDesktopManager unavailable: windows count as on the current desktop";
-	}
+	// Process-lifetime worker: never join a stalled Explorer call from the GUI thread, including at exit.
+	auto* thread = new QThread;
+	this->queryWorker = new QObject;
+	this->queryWorker->moveToThread(thread);
+	QObject::connect(thread, &QThread::finished, this->queryWorker, &QObject::deleteLater);
+	thread->start();
+	this->queryTimer.setSingleShot(true);
+	QObject::connect(&this->queryTimer, &QTimer::timeout, this, &VirtualDesktops::queryPendingWindows);
 
 	this->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 	this->notifier = new QWinEventNotifier(this->event, this);
@@ -171,25 +173,100 @@ void VirtualDesktops::reload() {
 	this->ids = ids;
 	this->names = names;
 	this->mCurrent = current;
+	++this->desktopRevision;
+	this->refreshWindowCache();
 	qCInfo(logDesktops) << "Desktops:" << this->count() << "current:" << this->mCurrent + 1;
 	emit this->changed();
 }
 
 qsizetype VirtualDesktops::desktopOf(quintptr hwnd) const {
-	if (!this->manager) return -1;
-	GUID id {};
-	auto* manager = static_cast<IVirtualDesktopManager*>(this->manager);
-	if (FAILED(manager->GetWindowDesktopId(reinterpret_cast<HWND>(hwnd), &id)) || id == GUID_NULL) return -1; // NOLINT
+	auto cached = this->windowCache.constFind(hwnd);
+	if (cached == this->windowCache.cend() || cached->id.isNull()) return -1;
 	if (this->ids.isEmpty()) return 0;
-	return this->ids.indexOf(QUuid(id));
+	return this->ids.indexOf(cached->id);
 }
 
-bool VirtualDesktops::onOtherDesktop(quintptr hwnd) const {
-	if (!this->manager) return false;
-	BOOL onCurrent = TRUE;
-	auto* manager = static_cast<IVirtualDesktopManager*>(this->manager);
-	if (FAILED(manager->IsWindowOnCurrentVirtualDesktop(reinterpret_cast<HWND>(hwnd), &onCurrent))) return false; // NOLINT
-	return !onCurrent && this->desktopOf(hwnd) >= 0;
+bool VirtualDesktops::onOtherDesktop(quintptr hwnd) {
+	auto cached = this->windowCache.constFind(hwnd);
+	if (cached == this->windowCache.cend() || cached->id.isNull()) {
+		this->requestWindow(hwnd);
+		return false;
+	}
+	// A cached answer remains useful across switches: compare desktop identities, not the old "on current" bit.
+	auto pinned = cached->onCurrent && !cached->queriedCurrent.isNull() && cached->id != cached->queriedCurrent;
+	auto desktop = this->desktopOf(hwnd);
+	return !pinned && desktop >= 0 && desktop != this->mCurrent;
+}
+
+void VirtualDesktops::forgetWindow(quintptr hwnd) {
+	this->windowCache.remove(hwnd);
+	this->pendingWindows.remove(hwnd);
+}
+
+void VirtualDesktops::refreshWindowCache() {
+	// Also retry cloaked candidates not in the model yet, and prune handles whose destroy event was missed.
+	for (auto hwnd: this->windowCache.keys()) this->requestWindow(hwnd);
+}
+
+void VirtualDesktops::requestWindow(quintptr hwnd) {
+	DWORD pid = 0;
+	if (!GetWindowThreadProcessId(reinterpret_cast<HWND>(hwnd), &pid)) { // NOLINT
+		this->forgetWindow(hwnd);
+		return;
+	}
+	auto& cached = this->windowCache[hwnd];
+	if (cached.pid != pid || !cached.token) cached = {{}, true, pid, ++this->nextWindowToken};
+	this->pendingWindows.insert(hwnd);
+	if (!this->queryInFlight) this->queryTimer.start();
+}
+
+void VirtualDesktops::queryPendingWindows() {
+	if (this->queryInFlight || this->pendingWindows.isEmpty()) return;
+	this->queryInFlight = true;
+	QHash<quintptr, CachedDesktop> requests;
+	for (auto hwnd: std::exchange(this->pendingWindows, {})) requests.insert(hwnd, this->windowCache.value(hwnd));
+	auto revision = this->desktopRevision;
+	auto currentId = this->ids.value(this->mCurrent);
+	QMetaObject::invokeMethod(this->queryWorker, [this, requests, revision, currentId]() {
+		// COM is created, used and released in the same apartment. One batch at a time, with GUI-side coalescing.
+		auto initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+		constexpr CLSID clsid {0xaa509086, 0x5ca9, 0x4c25, {0x8f, 0x95, 0x58, 0x9d, 0x3c, 0x07, 0xb4, 0x8a}};
+		IVirtualDesktopManager* manager = nullptr;
+		QHash<quintptr, CachedDesktop> results;
+		if (SUCCEEDED(initialized) && SUCCEEDED(CoCreateInstance(clsid, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&manager)))) {
+			if (!qEnvironmentVariableIsEmpty("II_DATA_DIR")) {
+				auto delay = std::clamp(qEnvironmentVariableIntValue("QS_TEST_DESKTOP_QUERY_DELAY_MS"), 0, 60000);
+				if (delay) qInfo() << "desktops: test query delayed" << delay;
+				QThread::msleep(delay);
+			}
+			for (auto it = requests.cbegin(); it != requests.cend(); ++it) {
+				auto* hwnd = reinterpret_cast<HWND>(it.key()); // NOLINT
+				GUID id {};
+				BOOL onCurrent = TRUE;
+				DWORD pid = 0;
+				if (SUCCEEDED(manager->GetWindowDesktopId(hwnd, &id))
+				    && SUCCEEDED(manager->IsWindowOnCurrentVirtualDesktop(hwnd, &onCurrent))
+				    && GetWindowThreadProcessId(hwnd, &pid) && pid == it->pid)
+					results.insert(it.key(), {QUuid(id), onCurrent != FALSE, pid, it->token, currentId});
+			}
+			manager->Release();
+		}
+		if (SUCCEEDED(initialized)) CoUninitialize();
+		QMetaObject::invokeMethod(this, [this, requests, results, revision]() {
+			this->queryInFlight = false;
+			for (auto it = requests.cbegin(); it != requests.cend(); ++it) {
+				auto cached = this->windowCache.find(it.key());
+				if (cached == this->windowCache.end() || cached->token != it->token) continue;
+				if (revision != this->desktopRevision) { this->pendingWindows.insert(it.key()); continue; }
+				auto result = results.constFind(it.key());
+				if (result == results.cend()) continue; // Explorer unavailable: retain the last valid answer
+				auto changed = result->id != cached->id || result->onCurrent != cached->onCurrent;
+				*cached = *result;
+				if (changed) emit this->windowDesktopChanged(it.key());
+			}
+			if (!this->pendingWindows.isEmpty()) this->queryTimer.start();
+		}, Qt::QueuedConnection);
+	}, Qt::QueuedConnection);
 }
 
 namespace {
