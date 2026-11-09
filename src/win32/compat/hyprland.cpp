@@ -243,6 +243,8 @@ HyprlandMonitor::HyprlandMonitor(QScreen* screen, qint32 id, QObject* parent)
     , mId(id) {
 	QObject::connect(screen, &QScreen::geometryChanged, this, &HyprlandMonitor::geometryChanged);
 	QObject::connect(screen, &QScreen::logicalDotsPerInchChanged, this, &HyprlandMonitor::geometryChanged);
+	QObject::connect(screen, &QScreen::availableGeometryChanged, this, &HyprlandMonitor::geometryChanged);
+	QObject::connect(this, &HyprlandMonitor::geometryChanged, this, &HyprlandMonitor::lastIpcObjectChanged);
 }
 
 // Hyprland names monitors after connectors (DP-1); Windows only has \\.\DISPLAYn.

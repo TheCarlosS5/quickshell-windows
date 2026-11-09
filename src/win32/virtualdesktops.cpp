@@ -201,6 +201,13 @@ bool VirtualDesktops::onOtherDesktop(quintptr hwnd) {
 void VirtualDesktops::forgetWindow(quintptr hwnd) {
 	this->windowCache.remove(hwnd);
 	this->pendingWindows.remove(hwnd);
+	this->queryingWindows.remove(hwnd);
+}
+
+bool VirtualDesktops::windowQueryPending(quintptr hwnd) const {
+	auto cached = this->windowCache.constFind(hwnd);
+	return this->pendingWindows.contains(hwnd) || (cached != this->windowCache.cend()
+	    && this->queryingWindows.value(hwnd, 0) == cached->token);
 }
 
 void VirtualDesktops::refreshWindowCache() {
@@ -224,7 +231,10 @@ void VirtualDesktops::queryPendingWindows() {
 	if (this->queryInFlight || this->pendingWindows.isEmpty()) return;
 	this->queryInFlight = true;
 	QHash<quintptr, CachedDesktop> requests;
-	for (auto hwnd: std::exchange(this->pendingWindows, {})) requests.insert(hwnd, this->windowCache.value(hwnd));
+	for (auto hwnd: std::exchange(this->pendingWindows, {})) {
+		requests.insert(hwnd, this->windowCache.value(hwnd));
+		this->queryingWindows.insert(hwnd, requests.value(hwnd).token);
+	}
 	auto revision = this->desktopRevision;
 	auto currentId = this->ids.value(this->mCurrent);
 	QMetaObject::invokeMethod(this->queryWorker, [this, requests, revision, currentId]() {
@@ -255,14 +265,15 @@ void VirtualDesktops::queryPendingWindows() {
 		QMetaObject::invokeMethod(this, [this, requests, results, revision]() {
 			this->queryInFlight = false;
 			for (auto it = requests.cbegin(); it != requests.cend(); ++it) {
+				if (this->queryingWindows.value(it.key(), 0) == it->token) this->queryingWindows.remove(it.key());
 				auto cached = this->windowCache.find(it.key());
 				if (cached == this->windowCache.end() || cached->token != it->token) continue;
 				if (revision != this->desktopRevision) { this->pendingWindows.insert(it.key()); continue; }
 				auto result = results.constFind(it.key());
 				if (result == results.cend()) continue; // Explorer unavailable: retain the last valid answer
-				auto changed = result->id != cached->id || result->onCurrent != cached->onCurrent;
 				*cached = *result;
-				if (changed) emit this->windowDesktopChanged(it.key());
+				// Recheck membership even if a completed query confirms the old desktop.
+				emit this->windowDesktopChanged(it.key());
 			}
 			if (!this->pendingWindows.isEmpty()) this->queryTimer.start();
 		}, Qt::QueuedConnection);

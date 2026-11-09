@@ -42,6 +42,7 @@ public:
 	void requestWindow(quintptr hwnd);
 	void forgetWindow(quintptr hwnd);
 	void refreshWindowCache();
+	[[nodiscard]] bool windowQueryPending(quintptr hwnd) const;
 
 	void switchTo(qsizetype index);
 	void create();
@@ -86,6 +87,7 @@ private:
 	QObject* queryWorker = nullptr;
 	QTimer queryTimer;
 	QSet<quintptr> pendingWindows;
+	QHash<quintptr, quint64> queryingWindows;
 	bool queryInFlight = false;
 	quint64 desktopRevision = 0;
 	quint64 nextWindowToken = 0;

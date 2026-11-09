@@ -482,7 +482,11 @@ bool WindowTracker::isAppWindow(quintptr handle) {
 	DWORD cloaked = 0;
 	DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
 	// Windows on other desktops are cloaked by the shell (not by their app, not inherited).
-	if (cloaked != 0 && (cloaked != DWM_CLOAKED_SHELL || !VirtualDesktops::instance()->onOtherDesktop(handle))) return false;
+	if (cloaked != 0) {
+		auto* desktops = VirtualDesktops::instance();
+		auto awaitingDesktop = constructedTracker && constructedTracker->forHwnd(handle) && desktops->windowQueryPending(handle);
+		if (cloaked != DWM_CLOAKED_SHELL || (!awaitingDesktop && !desktops->onOtherDesktop(handle))) return false;
+	}
 
 	if (GetWindowTextLengthW(hwnd) == 0) return false;
 
